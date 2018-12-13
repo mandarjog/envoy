@@ -3,9 +3,15 @@ mergeInto(LibraryManager.library, {
         ps = Pointer_stringify(arg2);
         console.log("envoy_log:", arg1, ps);
     },
-    envoy_addHeader: function() {},
+    envoy_addHeader: function(type, key_data, key_size, value_data, value_size) {
+        key = UTF8ToString(key_data); //, key_size);
+        value = UTF8ToString(value_data); //, key_size);
+        ah = Module["add_header"]
+			  if (ah) {
+					ah(key, value);
+				}
+		},
     envoy_getHeader: function(type, key_data, key_size, value_ptr, value_size_ptr) {
-        debugger;
         key = UTF8ToString(key_data); //, key_size);
         rh = Module["request_headers"]();
 
