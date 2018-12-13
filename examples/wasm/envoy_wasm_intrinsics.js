@@ -4,18 +4,24 @@ mergeInto(LibraryManager.library, {
         console.log("envoy_log:", arg1, ps);
     },
     envoy_addHeader: function(type, key_data, key_size, value_data, value_size) {
+        resp = Module["resp"];
+        if (!req) {
+            return;
+        }
+
         key = UTF8ToString(key_data); //, key_size);
         value = UTF8ToString(value_data); //, key_size);
-        ah = Module["add_header"]
-			  if (ah) {
-					ah(key, value);
-				}
-		},
+        resp.setHeader(key, value);
+    },
     envoy_getHeader: function(type, key_data, key_size, value_ptr, value_size_ptr) {
-        key = UTF8ToString(key_data); //, key_size);
-        rh = Module["request_headers"]();
+        req = Module["req"];
+        if (!req) {
+            return;
+        }
 
-        let val = rh[key];
+        key = UTF8ToString(key_data); //, key_size);
+
+        let val = req.getHeader(key);
         let val_len = val.length;
 
         let string_on_heap = _malloc(val_len + 1);
@@ -23,11 +29,24 @@ mergeInto(LibraryManager.library, {
         setValue(value_ptr, string_on_heap, "i32");
         setValue(value_size_ptr, val_len + 1, "i32");
     },
-    envoy_replaceHeader: function() {},
-    envoy_removeHeader: function() {},
+    envoy_replaceHeader: function(type, key_data, key_size, value_data, value_size) {
+        resp = Module["resp"];
+        if (!req) {
+            return;
+        }
+
+        key = UTF8ToString(key_data); //, key_size);
+        value = UTF8ToString(value_data); //, key_size);
+        resp.setHeader(key, value);
+    },
+    envoy_removeHeader: function(type, key_data, key_size) {},
     envoy_getBodyBufferBytes: function() {},
     envoy_getHeaderPairs: function(headertype, hptr, hptr_size) {
-        rh = Module["request_headers"]();
+        req = Module["req"];
+        if (!req) {
+            return;
+        }
+        rh = req.headers;
         let size = 4; // size of int32
         let nkeys = 0;
         Object.keys(rh).forEach(key => {
