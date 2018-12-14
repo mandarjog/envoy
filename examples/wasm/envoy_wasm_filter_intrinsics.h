@@ -32,6 +32,9 @@ enum class FilterDataStatus : int { Continue = 0, StopIterationAndBuffer = 1,
   StopIterationAndWatermark = 2, StopIterationNoBuffer = 3 };
 
 // Calls from WASM to Envoy.
+extern "C" void envoy_callAsync(const char* url_ptr, size_t url_size);
+
+
 extern "C" void envoy_addHeader(HeaderType type, const char* key_ptr, size_t key_size,
                                      const char* value_ptr, size_t value_size);
 
@@ -102,6 +105,7 @@ inline std::vector<std::pair<std::string_view, std::string_view>> WasmData::pair
 // Calls from Envoy to WASM.
 extern "C" int main();
 
+extern "C" FilterHeadersStatus onContinue(int32_t context_id, int32_t async_id);
 extern "C" FilterHeadersStatus onStart(int32_t context_id);
 extern "C" FilterDataStatus onBody(int32_t context_id, uint32_t body_buffer_length, uint32_t end_of_stream);
 extern "C" FilterTrailersStatus onTrailers(int32_t context_id);

@@ -16,6 +16,7 @@ public:
 
 private:
   int32_t id_;
+	bool suspended_;
 };
 
 static std::unordered_map<int32_t, std::unique_ptr<Context>> context_map;
@@ -47,7 +48,16 @@ FilterHeadersStatus Context::onStart() {
     logInfo(std::string(p.first) + std::string(" -> ") + std::string(p.second));
   }
   addHeader(HeaderType::Header, "newheader", "newheadervalue");
+  addHeader(HeaderType::Header, "x-ctx", std::to_string(id_));
   replaceHeader(HeaderType::Header, "server", "envoy-wasm");
+	if (id_ == 2) {
+		if (suspended_) {
+			suspended_ = false;
+  		return FilterHeadersStatus::Continue;
+		}
+		suspended_ = true;
+		return FilterHeadersStatus::StopIteration;
+	}
   return FilterHeadersStatus::Continue;
 }
 
