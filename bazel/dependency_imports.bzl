@@ -19,7 +19,7 @@ def envoy_dependency_imports(go_version = GO_VERSION):
     gazelle_dependencies()
     apple_rules_dependencies()
     upb_bazel_version_repository(name = "upb_bazel_version")
-    antlr_dependencies(471)
+    antlr_dependencies(472)
 
     go_repository(
         name = "org_golang_google_grpc",
