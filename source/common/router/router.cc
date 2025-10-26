@@ -1962,6 +1962,18 @@ void Filter::onUpstreamComplete(UpstreamRequest& upstream_request) {
 
       code_stats.chargeResponseTiming(info);
     }
+
+    // Record time to first upstream response body byte if available.
+    StreamInfo::TimingUtility timing(upstream_request.streamInfo());
+    auto first_body_time = timing.firstUpstreamRxBodyByteReceived();
+    if (first_body_time.has_value()) {
+      const uint64_t first_body_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(first_body_time.value()).count();
+      cluster_->statsScope()
+          .histogramFromString("upstream_rq_first_body_rx_ms",
+                               Stats::Histogram::Unit::Milliseconds)
+          .recordValue(first_body_ms);
+    }
   }
 
   // Defer deletion as this is generally called under the stack of the upstream

@@ -245,6 +245,7 @@ are rooted at *cluster.<name>.* and contain the following statistics:
   upstream_rq_<\*xx>, Counter, "Aggregate HTTP response codes (e.g., 2xx, 3xx, etc.)"
   upstream_rq_<\*>, Counter, "Specific HTTP response codes (e.g., 201, 302, etc.)"
   upstream_rq_time, Histogram, Request time milliseconds
+  upstream_rq_first_body_rx_ms, Histogram, "Time in milliseconds from request start to first response body byte received from upstream"
   canary.upstream_rq_completed, Counter, "Total upstream canary requests completed"
   canary.upstream_rq_<\*xx>, Counter, Upstream canary aggregate HTTP response codes
   canary.upstream_rq_<\*>, Counter, Upstream canary specific HTTP response codes
