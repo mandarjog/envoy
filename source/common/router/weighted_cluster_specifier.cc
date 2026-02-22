@@ -58,26 +58,10 @@ uint64_t WeightedClusterSpecifierPlugin::retryAwareClusterWeight(
     return config_weight;
   }
 
-  // Only zero out the weight if the cluster has a single endpoint. When a cluster
-  // has multiple endpoints, the existing host-level retry predicate
-  // (shouldSelectAnotherHost / PreviousHostsRetryPredicate) can avoid the
-  // previously-attempted host within the same cluster. Zeroing out a multi-endpoint
-  // cluster would unnecessarily remove it from consideration.
-  auto* cluster = cluster_manager_.getThreadLocalCluster(cluster_name);
-  if (cluster != nullptr) {
-    uint64_t total_hosts = 0;
-    for (const auto& ps : cluster->prioritySet().hostSetsPerPriority()) {
-      total_hosts += ps->hosts().size();
-    }
-    if (total_hosts > 1) {
-      ENVOY_LOG(debug,
-                "retry-aware lb: keeping previously attempted cluster {} "
-                "(has {} endpoints, host-level predicate can handle retry)",
-                cluster_name, total_hosts);
-      return config_weight;
-    }
-  }
-
+  // If this cluster is in the attempted set, it was already verified as a
+  // single-endpoint cluster in doRetry() before being recorded. Multi-endpoint
+  // clusters are never added to the attempted set — they rely on host-level
+  // retry predicates (PreviousHostsRetryPredicate) instead.
   ENVOY_LOG(debug,
             "retry-aware lb: zeroing weight for previously attempted single-endpoint "
             "cluster {}",
@@ -182,9 +166,10 @@ WeightedClusterSpecifierPlugin::WeightedClusterSpecifierPlugin(
 class WeightedClusterEntry : public DynamicRouteEntry {
 public:
   WeightedClusterEntry(RouteConstSharedPtr route, std::string&& cluster_name,
-                       WeightedClustersConfigEntryConstSharedPtr config, bool has_alternatives)
+                       WeightedClustersConfigEntryConstSharedPtr config,
+                       const WeightedClusterSpecifierPlugin* plugin)
       : DynamicRouteEntry(route, std::move(cluster_name)), config_(std::move(config)),
-        has_alternatives_(has_alternatives) {
+        plugin_(plugin) {
     ASSERT(config_ != nullptr);
   }
 
@@ -255,10 +240,13 @@ public:
     return result;
   }
 
-  // Only worth re-evaluating the route on retry when there is more than one
-  // weighted cluster to choose from. Single-cluster weighted routes (common in
-  // control-plane configs) skip the retry-aware path entirely.
-  bool retryAwareWeightedClusters() const override { return has_alternatives_; }
+  RouteConstSharedPtr retryRoute(const Http::RequestHeaderMap& headers,
+                                 StreamInfo::StreamInfo& stream_info) const override {
+    if (plugin_ == nullptr) {
+      return nullptr;
+    }
+    return plugin_->retryRoute(clusterName(), base_route_, headers, stream_info);
+  }
 
 private:
   const HeaderParser& requestHeaderParser() const {
@@ -275,7 +263,7 @@ private:
   }
 
   WeightedClustersConfigEntryConstSharedPtr config_;
-  const bool has_alternatives_;
+  const WeightedClusterSpecifierPlugin* plugin_;
 };
 
 // Selects a cluster depending on weight parameters from configuration or from headers.
@@ -451,10 +439,8 @@ RouteConstSharedPtr WeightedClusterSpecifierPlugin::pickWeightedCluster(
     }
 
     if (selected_value >= begin && selected_value < end) {
-      const bool has_alternatives = weighted_clusters_.size() > 1;
       if (!cluster->cluster_name_.empty()) {
-        return std::make_shared<WeightedClusterEntry>(std::move(parent), "", cluster,
-                                                      has_alternatives);
+        return std::make_shared<WeightedClusterEntry>(std::move(parent), "", cluster, this);
       }
       ASSERT(!cluster->cluster_header_name_.get().empty());
 
@@ -462,7 +448,7 @@ RouteConstSharedPtr WeightedClusterSpecifierPlugin::pickWeightedCluster(
       absl::string_view cluster_name =
           entries.empty() ? absl::string_view{} : entries[0]->value().getStringView();
       return std::make_shared<WeightedClusterEntry>(std::move(parent), std::string(cluster_name),
-                                                    cluster, has_alternatives);
+                                                    cluster, this);
     }
     begin = end;
   }
@@ -488,6 +474,58 @@ WeightedClusterSpecifierPlugin::validateClusters(const Upstream::ClusterManager&
         fmt::format("route: unknown weighted cluster '{}'", cluster->cluster_name_));
   }
   return absl::OkStatus();
+}
+
+RouteConstSharedPtr WeightedClusterSpecifierPlugin::retryRoute(
+    const std::string& failed_cluster_name, RouteConstSharedPtr parent_route,
+    const Http::RequestHeaderMap& headers, StreamInfo::StreamInfo& stream_info) const {
+  if (!retry_aware_lb_ || weighted_clusters_.size() <= 1) {
+    return nullptr; // No alternatives to retry against.
+  }
+
+  // Only single-endpoint clusters (e.g. egress VIPs) need cluster-level retry
+  // routing. Multi-endpoint clusters rely on host-level retry predicates
+  // (PreviousHostsRetryPredicate) to pick a different host within the same cluster.
+  auto* failed_cluster = cluster_manager_.getThreadLocalCluster(failed_cluster_name);
+  if (failed_cluster != nullptr) {
+    uint64_t total_hosts = 0;
+    for (const auto& ps : failed_cluster->prioritySet().hostSetsPerPriority()) {
+      total_hosts += ps->hosts().size();
+    }
+    if (total_hosts > 1) {
+      ENVOY_LOG(debug,
+                "retry-aware lb: skipping for cluster '{}' with {} endpoints "
+                "(host-level retry predicate will handle)",
+                failed_cluster_name, total_hosts);
+      return nullptr;
+    }
+  }
+
+  // Record the failed cluster in filter state so pickWeightedCluster can exclude it.
+  const auto& filter_state = stream_info.filterState();
+  auto* attempted = filter_state->getDataMutable<AttemptedClustersFilterState>(
+      kWeightedClusterAttemptedClustersKey);
+  if (attempted == nullptr) {
+    auto attempted_clusters = std::make_shared<AttemptedClustersFilterState>();
+    attempted_clusters->addAttemptedCluster(failed_cluster_name);
+    filter_state->setData(kWeightedClusterAttemptedClustersKey, attempted_clusters,
+                          StreamInfo::FilterState::StateType::Mutable,
+                          StreamInfo::FilterState::LifeSpan::Request);
+    ENVOY_LOG(debug, "retry-aware lb: recorded first attempted cluster '{}' in filter state",
+              failed_cluster_name);
+  } else {
+    attempted->addAttemptedCluster(failed_cluster_name);
+    ENVOY_LOG(debug,
+              "retry-aware lb: recorded attempted cluster '{}' in filter state "
+              "(total attempted: {})",
+              failed_cluster_name, attempted->size());
+  }
+
+  // Re-pick a weighted cluster. The filter state now contains the attempted clusters,
+  // so pickWeightedCluster will zero their weights and select a different one.
+  auto parent = std::static_pointer_cast<const RouteEntryAndRoute>(parent_route);
+  return pickWeightedCluster(std::move(parent), headers, stream_info,
+                             loader_.snapshot().random());
 }
 
 } // namespace Router

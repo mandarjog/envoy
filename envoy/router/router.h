@@ -1172,15 +1172,23 @@ public:
                                    const StreamInfo::StreamInfo& stream_info) const PURE;
 
   /**
-   * @return true if this route entry was produced by a weighted cluster specifier plugin
-   *         that supports retry-aware cluster selection. When true, doRetry() will record
-   *         attempted clusters in filter state and re-evaluate the route to avoid retrying
-   *         to the same (likely broken) single-endpoint cluster.
+   * Attempt to select an alternative route for a retry. Called by doRetry() when a request
+   * to this route's cluster has failed. The implementation may record the failed cluster and
+   * return a new route that targets a different cluster.
    *
-   * The default implementation returns false so that non-weighted-cluster routes pay zero
-   * cost on the retry path (no FilterState allocation, no clearRouteCache).
+   * The default implementation returns nullptr, meaning no special retry routing — the
+   * normal host-level retry predicates handle it. Subclasses (e.g. weighted cluster entries)
+   * may override to provide cluster-level retry routing for single-endpoint clusters.
+   *
+   * @param headers the downstream request headers.
+   * @param stream_info the stream info for the request (filter state may be modified).
+   * @return RouteConstSharedPtr a new route targeting a different cluster, or nullptr if
+   *         no alternative is available and normal retry should proceed.
    */
-  virtual bool retryAwareWeightedClusters() const { return false; }
+  virtual RouteConstSharedPtr retryRoute(const Http::RequestHeaderMap&,
+                                         StreamInfo::StreamInfo&) const {
+    return nullptr;
+  }
 };
 
 /**

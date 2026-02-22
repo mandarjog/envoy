@@ -111,6 +111,22 @@ public:
 
   absl::Status validateClusters(const Upstream::ClusterManager& cm) const override;
 
+  /**
+   * Attempt to select an alternative weighted cluster for a retry. Records the failed
+   * cluster in filter state and re-picks, skipping previously attempted single-endpoint
+   * clusters. Multi-endpoint clusters return nullptr (host-level retry predicates handle them).
+   *
+   * @param failed_cluster_name the cluster that just failed.
+   * @param parent_route the parent route (used by pickWeightedCluster to create new entries).
+   * @param headers the downstream request headers.
+   * @param stream_info the stream info (filter state will be modified).
+   * @return RouteConstSharedPtr a new route targeting a different cluster, or nullptr.
+   */
+  RouteConstSharedPtr retryRoute(const std::string& failed_cluster_name,
+                                 RouteConstSharedPtr parent_route,
+                                 const Http::RequestHeaderMap& headers,
+                                 StreamInfo::StreamInfo& stream_info) const;
+
 private:
   RouteConstSharedPtr pickWeightedCluster(RouteEntryAndRouteConstSharedPtr parent,
                                           const Http::RequestHeaderMap& headers,

@@ -132,7 +132,8 @@ public:
   const RouteStatsContextOptRef routeStatsContext() const override;
   void refreshRouteCluster(const Http::RequestHeaderMap& headers,
                            const StreamInfo::StreamInfo& stream_info) const override;
-  bool retryAwareWeightedClusters() const override;
+  RouteConstSharedPtr retryRoute(const Http::RequestHeaderMap& headers,
+                                 StreamInfo::StreamInfo& stream_info) const override;
 
 private:
   const RouteEntry* base_route_entry_{};

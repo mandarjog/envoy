@@ -29,6 +29,7 @@
 #include "source/common/router/config_impl.h"
 #include "source/common/router/debug_config.h"
 #include "source/common/router/router.h"
+
 #include "source/common/stream_info/uint32_accessor_impl.h"
 #include "source/common/stream_info/utility.h"
 #include "source/common/tracing/http_tracer_impl.h"
@@ -7615,6 +7616,135 @@ TEST_F(RouterTest, OrcaLoadReportInvalidHeaderValue) {
   Http::ResponseHeaderMapPtr response_headers(new Http::TestResponseHeaderMapImpl{
       {":status", "200"}, {"endpoint-load-metrics-bin", orca_load_report_header_bin}});
   response_decoder->decodeHeaders(std::move(response_headers), true);
+}
+
+// =============================================================================
+// Retry-aware weighted cluster: doRetry records attempted cluster in filter state
+// and re-evaluates route.
+// =============================================================================
+
+// Verify that doRetry calls retryRoute() and uses its result to switch clusters.
+// The router doesn't know about weighted clusters — it just calls the generic
+// retryRoute() method and uses whatever route it returns.
+TEST_F(RouterTest, DoRetryCallsRetryRouteAndSwitchesCluster) {
+  // Create a mock route that retryRoute() will return, pointing to a different cluster.
+  auto retry_route = std::make_shared<NiceMock<MockRoute>>();
+  retry_route->route_entry_.cluster_name_ = "retry_cluster";
+  cm_.initializeThreadLocalClusters({"retry_cluster"});
+
+  ON_CALL(callbacks_.route_->route_entry_, retryRoute(_, _))
+      .WillByDefault(Return(retry_route));
+
+  NiceMock<Http::MockRequestEncoder> encoder1;
+  Http::ResponseDecoder* response_decoder = nullptr;
+  expectNewStreamWithImmediateEncoder(encoder1, &response_decoder, Http::Protocol::Http10);
+
+  expectResponseTimerCreate();
+
+  Http::TestRequestHeaderMapImpl headers{{"x-envoy-retry-on", "5xx"}, {"x-envoy-internal", "true"}};
+  HttpTestUtility::addDefaultHeaders(headers);
+  router_->decodeHeaders(headers, false);
+  EXPECT_CALL(*router_->retry_state_, enabled()).WillOnce(Return(true));
+  EXPECT_CALL(callbacks_, addDecodedData(_, _));
+  Buffer::OwnedImpl body("test body");
+  router_->decodeData(body, true);
+
+  // Set up the retry callback.
+  EXPECT_CALL(*router_->retry_state_,
+              shouldRetryReset(Http::StreamResetReason::RemoteReset, _, _, _))
+      .WillOnce(Invoke([this](const Http::StreamResetReason, RetryState::Http3Used,
+                              RetryState::DoRetryResetCallback callback, bool) {
+        router_->retry_state_->callback_ = [callback]() { callback(/*disable_http3=*/false); };
+        return RetryStatus::Yes;
+      }));
+  EXPECT_CALL(cm_.thread_local_cluster_.conn_pool_.host_->outlier_detector_,
+              putResult(Upstream::Outlier::Result::LocalOriginConnectFailed, _));
+  encoder1.stream_.resetStream(Http::StreamResetReason::RemoteReset);
+
+  // No clearRouteCache — the new design bypasses route cache entirely.
+  EXPECT_CALL(callbacks_.downstream_callbacks_, clearRouteCache()).Times(0);
+
+  // Set up the second upstream connection for the retry.
+  NiceMock<Http::MockRequestEncoder> encoder2;
+  EXPECT_CALL(cm_.thread_local_cluster_.conn_pool_, newStream(_, _, _))
+      .WillOnce(
+          Invoke([&](Http::ResponseDecoder& decoder, Http::ConnectionPool::Callbacks& callbacks,
+                     const Http::ConnectionPool::Instance::StreamOptions&)
+                     -> Http::ConnectionPool::Cancellable* {
+            response_decoder = &decoder;
+            EXPECT_CALL(cm_.thread_local_cluster_.conn_pool_.host_->outlier_detector_,
+                        putResult(Upstream::Outlier::Result::LocalOriginConnectSuccess,
+                                  absl::optional<uint64_t>(absl::nullopt)));
+            callbacks.onPoolReady(encoder2, cm_.thread_local_cluster_.conn_pool_.host_,
+                                  upstream_stream_info_, Http::Protocol::Http10);
+            return nullptr;
+          }));
+
+  // Trigger the retry.
+  router_->retry_state_->callback_();
+
+  // Complete the request successfully.
+  Http::ResponseHeaderMapPtr response_headers(
+      new Http::TestResponseHeaderMapImpl{{":status", "200"}});
+  response_decoder->decodeHeaders(std::move(response_headers), true);
+  EXPECT_TRUE(verifyHostUpstreamStats(1, 1));
+}
+
+// Verify that when retryRoute() returns nullptr (the default), normal retry proceeds
+// without any disruption. This is the common case for all non-weighted-cluster routes.
+TEST_F(RouterTest, DoRetryNormalRetryWhenRetryRouteReturnsNull) {
+  // NiceMock default: retryRoute() returns nullptr — normal retry behavior.
+
+  NiceMock<Http::MockRequestEncoder> encoder1;
+  Http::ResponseDecoder* response_decoder = nullptr;
+  expectNewStreamWithImmediateEncoder(encoder1, &response_decoder, Http::Protocol::Http10);
+
+  expectResponseTimerCreate();
+
+  Http::TestRequestHeaderMapImpl headers{{"x-envoy-retry-on", "5xx"}, {"x-envoy-internal", "true"}};
+  HttpTestUtility::addDefaultHeaders(headers);
+  router_->decodeHeaders(headers, false);
+  EXPECT_CALL(*router_->retry_state_, enabled()).WillOnce(Return(true));
+  EXPECT_CALL(callbacks_, addDecodedData(_, _));
+  Buffer::OwnedImpl body("test body");
+  router_->decodeData(body, true);
+
+  EXPECT_CALL(*router_->retry_state_,
+              shouldRetryReset(Http::StreamResetReason::RemoteReset, _, _, _))
+      .WillOnce(Invoke([this](const Http::StreamResetReason, RetryState::Http3Used,
+                              RetryState::DoRetryResetCallback callback, bool) {
+        router_->retry_state_->callback_ = [callback]() { callback(/*disable_http3=*/false); };
+        return RetryStatus::Yes;
+      }));
+  EXPECT_CALL(cm_.thread_local_cluster_.conn_pool_.host_->outlier_detector_,
+              putResult(Upstream::Outlier::Result::LocalOriginConnectFailed, _));
+  encoder1.stream_.resetStream(Http::StreamResetReason::RemoteReset);
+
+  // No clearRouteCache should be called — retryRoute returns nullptr.
+  EXPECT_CALL(callbacks_.downstream_callbacks_, clearRouteCache()).Times(0);
+
+  NiceMock<Http::MockRequestEncoder> encoder2;
+  EXPECT_CALL(cm_.thread_local_cluster_.conn_pool_, newStream(_, _, _))
+      .WillOnce(
+          Invoke([&](Http::ResponseDecoder& decoder, Http::ConnectionPool::Callbacks& callbacks,
+                     const Http::ConnectionPool::Instance::StreamOptions&)
+                     -> Http::ConnectionPool::Cancellable* {
+            response_decoder = &decoder;
+            EXPECT_CALL(cm_.thread_local_cluster_.conn_pool_.host_->outlier_detector_,
+                        putResult(Upstream::Outlier::Result::LocalOriginConnectSuccess,
+                                  absl::optional<uint64_t>(absl::nullopt)));
+            callbacks.onPoolReady(encoder2, cm_.thread_local_cluster_.conn_pool_.host_,
+                                  upstream_stream_info_, Http::Protocol::Http10);
+            return nullptr;
+          }));
+
+  router_->retry_state_->callback_();
+
+  // Complete the request successfully.
+  Http::ResponseHeaderMapPtr response_headers(
+      new Http::TestResponseHeaderMapImpl{{":status", "200"}});
+  response_decoder->decodeHeaders(std::move(response_headers), true);
+  EXPECT_TRUE(verifyHostUpstreamStats(1, 1));
 }
 
 } // namespace Router

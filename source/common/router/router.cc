@@ -36,8 +36,6 @@
 #include "source/common/orca/orca_parser.h"
 #include "source/common/router/debug_config.h"
 #include "source/common/router/retry_state_impl.h"
-#include "source/common/router/weighted_cluster_specifier.h"
-#include "source/common/runtime/runtime_features.h"
 #include "source/common/stream_info/uint32_accessor_impl.h"
 
 namespace Envoy {
@@ -2191,49 +2189,18 @@ void Filter::doRetry(bool can_send_early_data, bool can_use_http3, TimeoutRetry 
     host_selection_cancelable_.reset();
   }
 
-  // Retry-aware weighted cluster selection: only activate when the current route
-  // was produced by a weighted cluster specifier plugin AND the runtime feature is
-  // enabled. Non-weighted-cluster routes (the vast majority) skip this entirely —
-  // no FilterState allocation, no clearRouteCache(), no route re-evaluation.
-  // The runtime guard allows disabling the feature without a rebuild if issues arise.
-  if (route_entry_ != nullptr && route_entry_->retryAwareWeightedClusters() &&
-      Runtime::runtimeFeatureEnabled("envoy.reloadable_features.retry_aware_weighted_clusters")) {
-    const std::string& failed_cluster_name = route_entry_->clusterName();
-    auto& filter_state = callbacks_->streamInfo().filterState();
-
-    auto* attempted = filter_state->getDataMutable<AttemptedClustersFilterState>(
-        kWeightedClusterAttemptedClustersKey);
-    if (attempted == nullptr) {
-      auto attempted_clusters = std::make_shared<AttemptedClustersFilterState>();
-      attempted_clusters->addAttemptedCluster(failed_cluster_name);
-      filter_state->setData(kWeightedClusterAttemptedClustersKey, attempted_clusters,
-                            StreamInfo::FilterState::StateType::Mutable,
-                            StreamInfo::FilterState::LifeSpan::Request);
-      ENVOY_STREAM_LOG(debug,
-                       "retry-aware lb: recorded first attempted cluster '{}' in filter state",
-                       *callbacks_, failed_cluster_name);
-    } else {
-      attempted->addAttemptedCluster(failed_cluster_name);
-      ENVOY_STREAM_LOG(debug,
-                       "retry-aware lb: recorded attempted cluster '{}' in filter state "
-                       "(total attempted: {})",
-                       *callbacks_, failed_cluster_name, attempted->size());
-    }
-
-    // Re-evaluate the route so that pickWeightedCluster runs again with the
-    // updated attempted-clusters filter state. This will cause a different
-    // cluster to be selected (if available).
-    // clearRouteCache is on DownstreamStreamFilterCallbacks, not available for
-    // async connections, so guard with a null check.
-    if (callbacks_->downstreamCallbacks()) {
-      callbacks_->downstreamCallbacks()->clearRouteCache();
-    }
-    route_ = callbacks_->route();
-    if (route_ != nullptr) {
+  // Ask the route entry if it can provide an alternative route for this retry.
+  // The default RouteEntry returns nullptr (normal retry), while weighted cluster
+  // entries may return a new route targeting a different cluster (e.g. when the
+  // failed cluster is a single-endpoint egress VIP).
+  if (route_entry_ != nullptr && downstream_headers_ != nullptr) {
+    auto new_route = route_entry_->retryRoute(*downstream_headers_, callbacks_->streamInfo());
+    if (new_route != nullptr) {
+      route_ = new_route;
       const auto* new_route_entry = route_->routeEntry();
       if (new_route_entry != nullptr) {
         route_entry_ = new_route_entry;
-        ENVOY_STREAM_LOG(debug, "retry-aware lb: re-evaluated route, new cluster '{}'", *callbacks_,
+        ENVOY_STREAM_LOG(debug, "retry-aware lb: re-routed to cluster '{}'", *callbacks_,
                          route_entry_->clusterName());
       }
     }

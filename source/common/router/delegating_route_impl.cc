@@ -179,8 +179,9 @@ void DelegatingRouteEntry::refreshRouteCluster(const Http::RequestHeaderMap& hea
   base_route_entry_->refreshRouteCluster(headers, stream_info);
 }
 
-bool DelegatingRouteEntry::retryAwareWeightedClusters() const {
-  return base_route_entry_->retryAwareWeightedClusters();
+RouteConstSharedPtr DelegatingRouteEntry::retryRoute(const Http::RequestHeaderMap& headers,
+                                                     StreamInfo::StreamInfo& stream_info) const {
+  return base_route_entry_->retryRoute(headers, stream_info);
 }
 
 } // namespace Router

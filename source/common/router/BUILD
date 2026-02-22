@@ -381,7 +381,6 @@ envoy_cc_library(
         ":retry_state_lib",
         ":upstream_codec_filter_lib",
         ":upstream_to_downstream_impl_base",
-        ":weighted_cluster_specifier_lib",
         "//envoy/event:dispatcher_interface",
         "//envoy/event:timer_interface",
         "//envoy/grpc:status",

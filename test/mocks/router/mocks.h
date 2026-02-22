@@ -466,6 +466,8 @@ public:
   MOCK_METHOD(const RouteStatsContextOptRef, routeStatsContext, (), (const));
   MOCK_METHOD(void, refreshRouteCluster,
               (const Http::RequestHeaderMap&, const StreamInfo::StreamInfo&), (const));
+  MOCK_METHOD(RouteConstSharedPtr, retryRoute,
+              (const Http::RequestHeaderMap&, StreamInfo::StreamInfo&), (const));
 
   std::string cluster_name_{"fake_cluster"};
   std::multimap<std::string, std::string> opaque_config_;
@@ -589,6 +591,8 @@ public:
   MOCK_METHOD(const RouteStatsContextOptRef, routeStatsContext, (), (const));
   MOCK_METHOD(void, refreshRouteCluster,
               (const Http::RequestHeaderMap&, const StreamInfo::StreamInfo&), (const));
+  MOCK_METHOD(RouteConstSharedPtr, retryRoute,
+              (const Http::RequestHeaderMap&, StreamInfo::StreamInfo&), (const));
 
   testing::NiceMock<MockRouteEntry> route_entry_;
   testing::NiceMock<MockDecorator> decorator_;
