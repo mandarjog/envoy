@@ -120,12 +120,16 @@ public:
    * @param parent_route the parent route (used by pickWeightedCluster to create new entries).
    * @param headers the downstream request headers.
    * @param stream_info the stream info (filter state will be modified).
+   * @param random_value the same random value used in the original cluster selection, ensuring
+   *        deterministic re-selection (the result changes only because attempted cluster weights
+   *        are zeroed, not because of a different random seed).
    * @return RouteConstSharedPtr a new route targeting a different cluster, or nullptr.
    */
   RouteConstSharedPtr retryRoute(const std::string& failed_cluster_name,
                                  RouteConstSharedPtr parent_route,
                                  const Http::RequestHeaderMap& headers,
-                                 StreamInfo::StreamInfo& stream_info) const;
+                                 StreamInfo::StreamInfo& stream_info,
+                                 uint64_t random_value) const;
 
 private:
   RouteConstSharedPtr pickWeightedCluster(RouteEntryAndRouteConstSharedPtr parent,

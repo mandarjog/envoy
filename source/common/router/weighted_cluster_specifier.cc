@@ -167,9 +167,9 @@ class WeightedClusterEntry : public DynamicRouteEntry {
 public:
   WeightedClusterEntry(RouteConstSharedPtr route, std::string&& cluster_name,
                        WeightedClustersConfigEntryConstSharedPtr config,
-                       const WeightedClusterSpecifierPlugin* plugin)
+                       const WeightedClusterSpecifierPlugin* plugin, uint64_t random_value)
       : DynamicRouteEntry(route, std::move(cluster_name)), config_(std::move(config)),
-        plugin_(plugin) {
+        plugin_(plugin), random_value_(random_value) {
     ASSERT(config_ != nullptr);
   }
 
@@ -245,7 +245,7 @@ public:
     if (plugin_ == nullptr) {
       return nullptr;
     }
-    return plugin_->retryRoute(clusterName(), base_route_, headers, stream_info);
+    return plugin_->retryRoute(clusterName(), base_route_, headers, stream_info, random_value_);
   }
 
 private:
@@ -264,6 +264,7 @@ private:
 
   WeightedClustersConfigEntryConstSharedPtr config_;
   const WeightedClusterSpecifierPlugin* plugin_;
+  const uint64_t random_value_;
 };
 
 // Selects a cluster depending on weight parameters from configuration or from headers.
@@ -440,7 +441,8 @@ RouteConstSharedPtr WeightedClusterSpecifierPlugin::pickWeightedCluster(
 
     if (selected_value >= begin && selected_value < end) {
       if (!cluster->cluster_name_.empty()) {
-        return std::make_shared<WeightedClusterEntry>(std::move(parent), "", cluster, this);
+        return std::make_shared<WeightedClusterEntry>(std::move(parent), "", cluster, this,
+                                                      random_value);
       }
       ASSERT(!cluster->cluster_header_name_.get().empty());
 
@@ -448,7 +450,7 @@ RouteConstSharedPtr WeightedClusterSpecifierPlugin::pickWeightedCluster(
       absl::string_view cluster_name =
           entries.empty() ? absl::string_view{} : entries[0]->value().getStringView();
       return std::make_shared<WeightedClusterEntry>(std::move(parent), std::string(cluster_name),
-                                                    cluster, this);
+                                                    cluster, this, random_value);
     }
     begin = end;
   }
@@ -478,7 +480,8 @@ WeightedClusterSpecifierPlugin::validateClusters(const Upstream::ClusterManager&
 
 RouteConstSharedPtr WeightedClusterSpecifierPlugin::retryRoute(
     const std::string& failed_cluster_name, RouteConstSharedPtr parent_route,
-    const Http::RequestHeaderMap& headers, StreamInfo::StreamInfo& stream_info) const {
+    const Http::RequestHeaderMap& headers, StreamInfo::StreamInfo& stream_info,
+    uint64_t random_value) const {
   if (!retry_aware_lb_ || weighted_clusters_.size() <= 1) {
     return nullptr; // No alternatives to retry against.
   }
@@ -521,11 +524,13 @@ RouteConstSharedPtr WeightedClusterSpecifierPlugin::retryRoute(
               failed_cluster_name, attempted->size());
   }
 
-  // Re-pick a weighted cluster. The filter state now contains the attempted clusters,
-  // so pickWeightedCluster will zero their weights and select a different one.
+  // Re-pick a weighted cluster using the same random_value as the original selection.
+  // The filter state now contains the attempted clusters, so pickWeightedCluster will
+  // zero their weights and select a different one. Using the same random_value ensures
+  // deterministic behavior — the selection changes only because the weight distribution
+  // changed, not because of a different random seed.
   auto parent = std::static_pointer_cast<const RouteEntryAndRoute>(parent_route);
-  return pickWeightedCluster(std::move(parent), headers, stream_info,
-                             loader_.snapshot().random());
+  return pickWeightedCluster(std::move(parent), headers, stream_info, random_value);
 }
 
 } // namespace Router
