@@ -12120,8 +12120,9 @@ virtual_hosts:
   TestConfigImpl config(parseRouteConfigurationFromYaml(yaml), factory_context_, true,
                         creation_status_);
 
+  NiceMock<Envoy::StreamInfo::MockStreamInfo> stream_info;
   Http::TestRequestHeaderMapImpl headers = genHeaders("www.lyft.com", "/foo", "GET");
-  auto route = config.route(headers, 10).route;
+  auto route = config.route(headers, stream_info, 10).route;
   ASSERT_NE(nullptr, route);
   EXPECT_EQ("only_cluster", route->routeEntry()->clusterName());
 

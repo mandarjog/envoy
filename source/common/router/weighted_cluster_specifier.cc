@@ -3,8 +3,6 @@
 #include "source/common/config/well_known_names.h"
 #include "source/common/router/config_utility.h"
 
-#include "absl/strings/str_join.h"
-
 namespace Envoy {
 namespace Router {
 
@@ -39,11 +37,8 @@ uint64_t WeightedClusterSpecifierPlugin::healthawareClusterWeight(const std::str
     }
   }
   if (!has_healthy) {
-    const auto& stats = cluster->info()->endpointStats();
-    uint64_t healthy_count = stats.membership_healthy_.value();
-    uint64_t total_count = stats.membership_total_.value();
-    ENVOY_LOG(debug, "unhealthy cluster {} has {} healthy hosts out of {} total hosts",
-              cluster_name, healthy_count, total_count);
+    ENVOY_LOG(debug, "health-aware lb: zeroing weight for cluster '{}' with no healthy hosts",
+              cluster_name);
     return 0;
   }
 
@@ -239,12 +234,12 @@ public:
   }
 
   /**
-   * Returns a callback suitable for setting on RetryState via setClusterRefreshCallback().
-   * The callback captures this entry's cluster name, parent route, plugin, and random value,
-   * and delegates to the plugin's retryRoute() method.
+   * Returns a callback that the router calls directly in doRetry() to select a different
+   * weighted cluster on retry. The callback captures this entry's cluster name, parent
+   * route, plugin, and random value, and delegates to the plugin's retryRoute() method.
    * @return ClusterRefreshFunction or nullptr if retry-aware LB is not applicable.
    */
-  RetryState::ClusterRefreshFunction clusterRefreshCallback() const override {
+  ClusterRefreshFunction clusterRefreshCallback() const override {
     if (plugin_ == nullptr || !plugin_->hasRetryAwareAlternatives()) {
       return nullptr;
     }
@@ -276,6 +271,11 @@ private:
   }
 
   WeightedClustersConfigEntryConstSharedPtr config_;
+  // Raw pointer is safe: the plugin is owned by the RouteEntryImplBase (via
+  // ClusterSpecifierPluginSharedPtr), which outlives all WeightedClusterEntry
+  // instances created from it. WeightedClusterEntry is a per-request object
+  // whose lifetime is bounded by the request/retry, while the route config
+  // (and its plugin) persists until a config update replaces it.
   const WeightedClusterSpecifierPlugin* plugin_;
   const uint64_t random_value_;
 };
@@ -489,6 +489,12 @@ RouteConstSharedPtr WeightedClusterSpecifierPlugin::retryRoute(
   // Only single-endpoint clusters (e.g. egress VIPs) need cluster-level retry
   // routing. Multi-endpoint clusters rely on host-level retry predicates
   // (PreviousHostsRetryPredicate) to pick a different host within the same cluster.
+  //
+  // NOTE: This is a point-in-time snapshot of the host count — the cluster's membership
+  // could change between this check and the actual upstream connection. This is acceptable
+  // because (a) it's a best-effort optimization, not a correctness invariant, and (b) the
+  // worst case is either an unnecessary cluster switch (host added) or a missed optimization
+  // (host removed), both of which are benign.
   auto* failed_cluster = cluster_manager_.getThreadLocalCluster(failed_cluster_name);
   if (failed_cluster != nullptr) {
     uint64_t total_hosts = 0;
@@ -505,6 +511,11 @@ RouteConstSharedPtr WeightedClusterSpecifierPlugin::retryRoute(
   }
 
   // Record the failed cluster in filter state so pickWeightedCluster can exclude it.
+  // Note: stream_info is taken as non-const here specifically because we need mutable
+  // access to FilterState (via filterState() → shared_ptr). The FilterState itself
+  // is a mutable, per-request object even though the StreamInfo reference could
+  // otherwise be const — this is consistent with how other Envoy subsystems
+  // (e.g. DynamicMetadata) mutate FilterState during request processing.
   const auto& filter_state = stream_info.filterState();
   auto* attempted = filter_state->getDataMutable<AttemptedClustersFilterState>(
       kWeightedClusterAttemptedClustersKey);

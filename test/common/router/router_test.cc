@@ -7621,17 +7621,20 @@ TEST_F(RouterTest, OrcaLoadReportInvalidHeaderValue) {
 // Retry-aware weighted cluster tests
 // =============================================================================
 
-// Verify that doRetry calls refreshClusterOnRetry() on the retry state and uses
-// the returned route to switch clusters. The router doesn't know about weighted
-// clusters — it just calls the generic refreshClusterOnRetry() method.
-TEST_F(RouterTest, DoRetryCallsRefreshClusterOnRetryAndSwitchesCluster) {
-  // Create a mock route that refreshClusterOnRetry() will return.
+// Verify that doRetry() calls route_entry_->clusterRefreshCallback() and, when
+// the callback returns a new route, switches to that route's cluster.
+TEST_F(RouterTest, DoRetryCallsClusterRefreshCallbackAndSwitchesCluster) {
+  // Create a mock route that the callback will return.
   auto retry_route = std::make_shared<NiceMock<MockRoute>>();
   retry_route->route_entry_.cluster_name_ = "retry_cluster";
   cm_.initializeThreadLocalClusters({"retry_cluster"});
 
-  ON_CALL(*router_->retry_state_, refreshClusterOnRetry(_, _))
-      .WillByDefault(Return(retry_route));
+  // Mock clusterRefreshCallback() on the route entry to return a callback
+  // that yields the retry route.
+  ON_CALL(callbacks_.route_->route_entry_, clusterRefreshCallback())
+      .WillByDefault(Return(
+          [retry_route](const Http::RequestHeaderMap&,
+                        StreamInfo::StreamInfo&) -> RouteConstSharedPtr { return retry_route; }));
 
   NiceMock<Http::MockRequestEncoder> encoder1;
   Http::ResponseDecoder* response_decoder = nullptr;
@@ -7649,7 +7652,7 @@ TEST_F(RouterTest, DoRetryCallsRefreshClusterOnRetryAndSwitchesCluster) {
   router_->retry_state_->expectResetRetry();
   encoder1.stream_.resetStream(Http::StreamResetReason::RemoteReset);
 
-  // Execute the retry callback — this should call refreshClusterOnRetry() and switch cluster.
+  // Execute the retry — doRetry() should call clusterRefreshCallback() and switch cluster.
   NiceMock<Http::MockRequestEncoder> encoder2;
   expectNewStreamWithImmediateEncoder(encoder2, &response_decoder, Http::Protocol::Http10);
   router_->retry_state_->callback_();
@@ -7664,10 +7667,10 @@ TEST_F(RouterTest, DoRetryCallsRefreshClusterOnRetryAndSwitchesCluster) {
   response_decoder->decodeHeaders(std::move(response_headers), true);
 }
 
-// Verify that when refreshClusterOnRetry() returns nullptr (the default),
-// normal retry proceeds without any disruption.
-TEST_F(RouterTest, DoRetryNormalRetryWhenRefreshClusterReturnsNull) {
-  // NiceMock default: refreshClusterOnRetry() returns nullptr — normal retry behavior.
+// Verify that when clusterRefreshCallback() returns nullptr (the default for
+// non-weighted-cluster routes), normal retry proceeds without any disruption.
+TEST_F(RouterTest, DoRetryNormalRetryWhenClusterRefreshCallbackReturnsNull) {
+  // NiceMock default: clusterRefreshCallback() returns nullptr — normal retry behavior.
 
   NiceMock<Http::MockRequestEncoder> encoder1;
   Http::ResponseDecoder* response_decoder = nullptr;
@@ -7682,9 +7685,6 @@ TEST_F(RouterTest, DoRetryNormalRetryWhenRefreshClusterReturnsNull) {
   // Trigger retry.
   router_->retry_state_->expectResetRetry();
   encoder1.stream_.resetStream(Http::StreamResetReason::RemoteReset);
-
-  // No clearRouteCache should be called — refreshClusterOnRetry returns nullptr.
-  EXPECT_CALL(callbacks_.downstream_callbacks_, clearRouteCache()).Times(0);
 
   NiceMock<Http::MockRequestEncoder> encoder2;
   expectNewStreamWithImmediateEncoder(encoder2, &response_decoder, Http::Protocol::Http10);

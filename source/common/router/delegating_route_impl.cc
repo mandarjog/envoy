@@ -179,7 +179,7 @@ void DelegatingRouteEntry::refreshRouteCluster(const Http::RequestHeaderMap& hea
   base_route_entry_->refreshRouteCluster(headers, stream_info);
 }
 
-RetryState::ClusterRefreshFunction DelegatingRouteEntry::clusterRefreshCallback() const {
+RouteEntry::ClusterRefreshFunction DelegatingRouteEntry::clusterRefreshCallback() const {
   return base_route_entry_->clusterRefreshCallback();
 }
 

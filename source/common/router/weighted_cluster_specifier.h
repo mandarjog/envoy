@@ -1,5 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <vector>
+
 #include "envoy/router/cluster_specifier_plugin.h"
 #include "envoy/stream_info/filter_state.h"
 
@@ -48,7 +51,10 @@ public:
   size_t size() const { return attempted_clusters_.size(); }
 
   absl::optional<std::string> serializeAsString() const override {
-    return absl::StrJoin(attempted_clusters_, ",");
+    // Sort for deterministic output — flat_hash_set iteration order is non-deterministic.
+    std::vector<absl::string_view> sorted(attempted_clusters_.begin(), attempted_clusters_.end());
+    std::sort(sorted.begin(), sorted.end());
+    return absl::StrJoin(sorted, ",");
   }
 
 private:
@@ -141,6 +147,10 @@ private:
   const std::string runtime_key_prefix_;
   const bool use_hash_policy_{};
   const bool health_aware_lb_{true};
+  // Intentionally always-on: retry-aware LB is a pure optimization with no behavioral
+  // downside (it only activates when retries are already configured and a cluster has
+  // failed). A proto config field may be added later if a disable switch is needed,
+  // but for now we avoid the control-plane complexity.
   const bool retry_aware_lb_{true};
   std::vector<WeightedClustersConfigEntryConstSharedPtr> weighted_clusters_;
   uint64_t total_cluster_weight_{0};
