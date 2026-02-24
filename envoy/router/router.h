@@ -501,6 +501,7 @@ public:
    * return how many times host selection should be reattempted during host selection.
    */
   virtual uint32_t hostSelectionMaxAttempts() const PURE;
+
 };
 
 using RetryStatePtr = std::unique_ptr<RetryState>;
@@ -1170,6 +1171,22 @@ public:
    */
   virtual void refreshRouteCluster(const Http::RequestHeaderMap& headers,
                                    const StreamInfo::StreamInfo& stream_info) const PURE;
+
+  /**
+   * Callback type for refreshing the cluster on retry. Receives the current request headers
+   * and stream info, returns a new route pointing to a different cluster, or nullptr if no
+   * cluster refresh is needed.
+   */
+  using ClusterRefreshFunction = std::function<RouteConstSharedPtr(
+      const Http::RequestHeaderMap& headers, StreamInfo::StreamInfo& stream_info)>;
+
+  /**
+   * Returns a callback function for refreshing the cluster on retry, if applicable.
+   * Weighted cluster routes override this to provide a callback that selects a different
+   * cluster on retry. The router calls this directly in doRetry().
+   * @return a ClusterRefreshFunction, or nullptr if cluster refresh on retry is not supported.
+   */
+  virtual ClusterRefreshFunction clusterRefreshCallback() const { return nullptr; }
 };
 
 /**

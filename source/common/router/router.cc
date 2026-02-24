@@ -2190,6 +2190,23 @@ void Filter::doRetry(bool can_send_early_data, bool can_use_http3, TimeoutRetry 
     host_selection_cancelable_.reset();
   }
 
+  // For weighted cluster routes, ask the route entry for a callback that can select a
+  // different cluster on retry. The callback records the failed cluster in FilterState and
+  // re-picks with that cluster's weight zeroed out. Each WeightedClusterEntry captures its
+  // own cluster name, so successive retries accumulate all failed clusters automatically.
+  if (downstream_headers_ != nullptr) {
+    auto cluster_refresh_cb = route_entry_->clusterRefreshCallback();
+    if (cluster_refresh_cb != nullptr) {
+      auto retry_route = cluster_refresh_cb(*downstream_headers_, callbacks_->streamInfo());
+      if (retry_route != nullptr) {
+        route_ = std::move(retry_route);
+        route_entry_ = route_->routeEntry();
+        ENVOY_STREAM_LOG(debug, "retry-aware lb: switched to cluster '{}'", *callbacks_,
+                          route_entry_->clusterName());
+      }
+    }
+  }
+
   // Clusters can technically get removed by CDS during a retry. Make sure it still exists.
   const auto cluster = config_->cm_.getThreadLocalCluster(route_entry_->clusterName());
   std::unique_ptr<GenericConnPool> generic_conn_pool;
