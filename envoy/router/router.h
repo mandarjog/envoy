@@ -1187,6 +1187,19 @@ public:
    * @return a ClusterRefreshFunction, or nullptr if cluster refresh on retry is not supported.
    */
   virtual ClusterRefreshFunction clusterRefreshCallback() const { return nullptr; }
+
+  /**
+   * Applies only the cluster-specific request header transforms for this route entry.
+   * Unlike finalizeRequestHeaders(), this does NOT apply parent-route or virtual-host
+   * header transforms (which were already applied during the initial request). This is
+   * called by doRetry() when a weighted-cluster retry lands on a different cluster, so
+   * that the new cluster's per-cluster headers replace those of the failed cluster.
+   *
+   * The default no-op implementation is correct for all non-weighted-cluster routes.
+   */
+  virtual void applyClusterHeaderTransforms(Http::RequestHeaderMap& /*headers*/,
+                                            const Formatter::HttpFormatterContext& /*context*/,
+                                            const StreamInfo::StreamInfo& /*stream_info*/) const {}
 };
 
 /**

@@ -2201,6 +2201,23 @@ void Filter::doRetry(bool can_send_early_data, bool can_use_http3, TimeoutRetry 
       if (retry_route != nullptr) {
         route_ = std::move(retry_route);
         route_entry_ = route_->routeEntry();
+        // Sync the connection-manager route cache so that callbacks_->route() and
+        // UpstreamRequest::route() (which calls callbacks_->route()) both see the new
+        // cluster. Without this, UpstreamRequest constructs stream_info_.route_ from the
+        // stale CM cache (the original cluster), breaking autoHostRewrite and upstream
+        // filter chains that inspect the route.
+        if (callbacks_->downstreamCallbacks()) {
+          callbacks_->downstreamCallbacks()->setRoute(route_);
+        }
+        // Apply the new cluster's per-cluster request header transforms. Parent-route and
+        // virtual-host transforms were already applied during decodeHeaders and must not be
+        // re-applied here (they would duplicate ADD-semantic headers). This fixes the bug
+        // where a retry to a different cluster would still carry the original cluster's
+        // cluster-specific headers.
+        const Formatter::HttpFormatterContext formatter_context(
+            downstream_headers_, {}, {}, {}, {}, &callbacks_->activeSpan());
+        route_entry_->applyClusterHeaderTransforms(*downstream_headers_, formatter_context,
+                                                   callbacks_->streamInfo());
         ENVOY_STREAM_LOG(debug, "retry-aware lb: switched to cluster '{}'", *callbacks_,
                           route_entry_->clusterName());
       }
@@ -2215,6 +2232,9 @@ void Filter::doRetry(bool can_send_early_data, bool can_use_http3, TimeoutRetry 
     cleanup();
     return;
   }
+  // Update cluster_ to the (possibly new) cluster so that createConnPool, stats, and
+  // UpstreamRequest (via parent_.cluster()) all reference the correct cluster info.
+  cluster_ = cluster->info();
 
   callbacks_->streamInfo().downstreamTiming().setValue(
       "envoy.router.host_selection_start_ms",
