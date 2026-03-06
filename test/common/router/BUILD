@@ -64,6 +64,7 @@ envoy_cc_test(
         "//source/common/router:delegating_route_lib",
         "//test/integration:http_integration_lib",
         "//test/test_common:utility_lib",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/endpoint/v3:pkg_cc_proto",
     ],
 )
