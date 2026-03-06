@@ -183,5 +183,11 @@ RouteEntry::ClusterRefreshFunction DelegatingRouteEntry::clusterRefreshCallback(
   return base_route_entry_->clusterRefreshCallback();
 }
 
+void DelegatingRouteEntry::applyClusterHeaderTransforms(
+    Http::RequestHeaderMap& headers, const Formatter::HttpFormatterContext& context,
+    const StreamInfo::StreamInfo& stream_info) const {
+  base_route_entry_->applyClusterHeaderTransforms(headers, context, stream_info);
+}
+
 } // namespace Router
 } // namespace Envoy

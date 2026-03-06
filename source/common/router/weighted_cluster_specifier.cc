@@ -256,6 +256,21 @@ public:
     };
   }
 
+  /**
+   * Applies only the cluster-specific request header transforms (request_headers_to_add/remove
+   * configured on the WeightedCluster entry). Parent-route and virtual-host header transforms
+   * are intentionally excluded because they were already applied during the initial request.
+   * Called by doRetry() when a retry selects a different weighted cluster.
+   */
+  void applyClusterHeaderTransforms(Http::RequestHeaderMap& headers,
+                                    const Formatter::HttpFormatterContext& context,
+                                    const StreamInfo::StreamInfo& stream_info) const override {
+    requestHeaderParser().evaluateHeaders(headers, context, stream_info);
+    if (!config_->host_rewrite_.empty()) {
+      headers.setHost(config_->host_rewrite_);
+    }
+  }
+
 private:
   const HeaderParser& requestHeaderParser() const {
     if (config_->request_headers_parser_ != nullptr) {
