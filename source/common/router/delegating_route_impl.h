@@ -103,6 +103,9 @@ public:
   Upstream::ResourcePriority priority() const override;
   const RateLimitPolicy& rateLimitPolicy() const override;
   const RetryPolicyConstSharedPtr& retryPolicy() const override;
+  // Whether re-evaluating the route on retry can yield a different cluster. Defaults to false;
+  // overridden by WeightedClusterEntry when the weighted cluster set has more than one entry.
+  virtual bool supportsClusterSwitchOnRetry() const { return false; }
   const Router::PathMatcherSharedPtr& pathMatcher() const override;
   const Router::PathRewriterSharedPtr& pathRewriter() const override;
   const InternalRedirectPolicy& internalRedirectPolicy() const override;

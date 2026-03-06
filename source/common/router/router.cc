@@ -510,10 +510,16 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
 
   // A route entry matches for the request.
   route_entry_ = route_->routeEntry();
-  // Detect whether the route was resolved by a cluster-specifier plugin (e.g. weighted clusters).
-  // A plugin-resolved route entry is always a DynamicRouteEntry. We record this once so that
-  // doRetry() can skip the expensive clearRouteCache+re-evaluate path for non-specifier routes.
-  uses_cluster_specifier_plugin_ = dynamic_cast<const DynamicRouteEntry*>(route_entry_) != nullptr;
+  // Detect whether retrying this route can switch to a different cluster. This is true only for
+  // weighted-cluster routes with more than one cluster. The DelegatingRouteEntry::
+  // supportsClusterSwitchOnRetry() virtual defaults to false; WeightedClusterEntry overrides it
+  // to return (total_cluster_count > 1). Single-cluster and non-weighted routes return false,
+  // avoiding the clearRouteCache+re-evaluate overhead in doRetry for those cases.
+  if (const auto* dre = dynamic_cast<const DynamicRouteEntry*>(route_entry_)) {
+    uses_cluster_specifier_plugin_ = dre->supportsClusterSwitchOnRetry();
+  } else {
+    uses_cluster_specifier_plugin_ = false;
+  }
   // Store buffer limits from the route entry.
   // The requestBodyBufferLimit() method handles both legacy per_request_buffer_limit_bytes
   // and new request_body_buffer_limit configurations automatically.
