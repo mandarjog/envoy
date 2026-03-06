@@ -375,17 +375,14 @@ RouteConstSharedPtr WeightedClusterSpecifierPlugin::pickWeightedCluster(
     }
   }
 
-  // Retry-aware weighted cluster selection: zero out the weight of any cluster
-  // that has already been attempted (and failed) on this request. This ensures that
-  // on retry, a different cluster is selected rather than re-trying the same
-  // (likely broken) cluster due to consistent hashing.
+  // Retry-aware weighted cluster selection: zero out the weight of any cluster that has already
+  // been attempted (and failed) on this request. This ensures that on retry, a different cluster
+  // is selected rather than re-trying the same (likely broken) cluster.
   //
   // This step only applies when:
   //  - The feature is enabled (retry_aware_lb_)
   //  - There are multiple clusters to choose from
-  //  - A hash policy is driving selection (hash_value.has_value()). Without hashing,
-  //    random selection will naturally distribute retries across clusters, so
-  //    zeroing out weights is unnecessary.
+  //  - The attempted-clusters filter state has been populated (i.e., doRetry ran at least once)
   const AttemptedClustersFilterState* attempted_clusters = nullptr;
   if (retry_aware_lb_ && weighted_clusters_.size() > 1) {
     attempted_clusters =

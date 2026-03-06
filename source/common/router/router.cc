@@ -510,6 +510,10 @@ Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers,
 
   // A route entry matches for the request.
   route_entry_ = route_->routeEntry();
+  // Detect whether the route was resolved by a cluster-specifier plugin (e.g. weighted clusters).
+  // A plugin-resolved route entry is always a DynamicRouteEntry. We record this once so that
+  // doRetry() can skip the expensive clearRouteCache+re-evaluate path for non-specifier routes.
+  uses_cluster_specifier_plugin_ = dynamic_cast<const DynamicRouteEntry*>(route_entry_) != nullptr;
   // Store buffer limits from the route entry.
   // The requestBodyBufferLimit() method handles both legacy per_request_buffer_limit_bytes
   // and new request_body_buffer_limit configurations automatically.
@@ -2191,10 +2195,21 @@ void Filter::doRetry(bool can_send_early_data, bool can_use_http3, TimeoutRetry 
     host_selection_cancelable_.reset();
   }
 
-  // Retry-aware weighted cluster selection: record the failed cluster name in
-  // filter state so that on route re-evaluation, pickWeightedCluster can
-  // zero out its weight and select a different cluster.
-  if (route_entry_ != nullptr) {
+  // Retry-aware weighted cluster selection: record the failed cluster name in filter state so that
+  // on route re-evaluation, pickWeightedCluster can zero out its weight and select a different
+  // cluster.
+  //
+  // This block only runs when ALL of the following hold:
+  //  1. The route was selected by a cluster-specifier plugin (uses_cluster_specifier_plugin_).
+  //  2. Downstream callbacks are available (required for clearRouteCache).
+  //  3. There is no hedged request in flight: with hedge_on_per_try_timeout, doRetry is called
+  //     while the original upstream request is still alive. Mutating route_ / route_entry_ in that
+  //     case would cause the hedged response callback to use the wrong cluster config for header
+  //     finalization, outlier detection, and stats.
+  const bool is_hedge_retry = is_timeout_retry == TimeoutRetry::Yes &&
+                              hedging_params_.hedge_on_per_try_timeout_;
+  if (route_entry_ != nullptr && uses_cluster_specifier_plugin_ && !is_hedge_retry &&
+      callbacks_->downstreamCallbacks()) {
     const std::string& failed_cluster_name = route_entry_->clusterName();
     auto& filter_state = callbacks_->streamInfo().filterState();
 
@@ -2218,19 +2233,20 @@ void Filter::doRetry(bool can_send_early_data, bool can_use_http3, TimeoutRetry 
                        *callbacks_, failed_cluster_name, attempted->size());
     }
 
-    // Re-evaluate the route so that pickWeightedCluster runs again with the
-    // updated attempted-clusters filter state. This will cause a different
-    // cluster to be selected (if available).
-    // clearRouteCache is on DownstreamStreamFilterCallbacks, not available for
-    // async connections, so guard with a null check.
-    if (callbacks_->downstreamCallbacks()) {
-      callbacks_->downstreamCallbacks()->clearRouteCache();
-    }
-    route_ = callbacks_->route();
-    if (route_ != nullptr) {
-      const auto* new_route_entry = route_->routeEntry();
+    // Re-evaluate the route so that pickWeightedCluster runs again with the updated
+    // attempted-clusters filter state, selecting a different cluster.
+    callbacks_->downstreamCallbacks()->clearRouteCache();
+    RouteConstSharedPtr new_route = callbacks_->route();
+    if (new_route != nullptr) {
+      const auto* new_route_entry = new_route->routeEntry();
       if (new_route_entry != nullptr) {
+        // Update route_ and route_entry_ to reflect the newly selected cluster.
+        route_ = std::move(new_route);
         route_entry_ = new_route_entry;
+        // Refresh derived state that is bound to the cluster so that stats, virtual-cluster
+        // accounting, and route-level stats all go to the correct (new) cluster.
+        request_vcluster_ = route_->virtualHost()->virtualCluster(*downstream_headers_);
+        route_stats_context_ = route_entry_->routeStatsContext();
         ENVOY_STREAM_LOG(debug, "retry-aware lb: re-evaluated route, new cluster '{}'",
                          *callbacks_, route_entry_->clusterName());
       }
@@ -2245,6 +2261,12 @@ void Filter::doRetry(bool can_send_early_data, bool can_use_http3, TimeoutRetry 
     cleanup();
     return;
   }
+
+  // Refresh cluster_ so that all subsequent stat charges, circuit-breaker accounting, and
+  // outlier-detection events go to the cluster that will actually serve this retry attempt.
+  // Without this, cluster_ stays pointing at the original cluster even when the weighted-cluster
+  // specifier re-routed to a different one above.
+  cluster_ = cluster->info();
 
   callbacks_->streamInfo().downstreamTiming().setValue(
       "envoy.router.host_selection_start_ms",

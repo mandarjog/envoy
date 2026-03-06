@@ -632,6 +632,10 @@ private:
   Http::StreamDecoderFilterCallbacks* callbacks_{};
   RouteConstSharedPtr route_;
   const RouteEntry* route_entry_{};
+  // True when the initial route was resolved by a cluster-specifier plugin (e.g. weighted
+  // clusters). doRetry() uses this to decide whether to clear the route cache and re-evaluate
+  // so that the plugin can pick a different cluster for the retry.
+  bool uses_cluster_specifier_plugin_{false};
   Upstream::ClusterInfoConstSharedPtr cluster_;
   std::unique_ptr<Stats::StatNameDynamicStorage> alt_stat_prefix_;
   const VirtualCluster* request_vcluster_{};
