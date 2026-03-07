@@ -1,7 +1,6 @@
 #include <chrono>
 #include <cstdint>
 
-#include "envoy/config/core/v3/base.pb.h"
 #include "envoy/config/endpoint/v3/endpoint_components.pb.h"
 
 #include "source/common/common/base64.h"
@@ -291,14 +290,20 @@ TEST_P(WeightedClusterHashPolicyIntegrationTest, WeightedDistributionTest) {
 // request headers (via applyClusterHeaderTransforms), NOT the original cluster's headers.
 //
 // Setup: two weighted clusters (cluster_0 / cluster_1, 50/50), each configured with
-// request_headers_to_add that writes a distinct value for the "x-routed-to" header using
-// OVERWRITE_IF_EXISTS_OR_ADD semantics.
+// request_headers_to_add using default APPEND_IF_EXISTS_OR_ADD semantics (the common
+// real-world case) writing a distinct value for the "x-routed-to" header.
+//
+// Without the pre-removal fix in applyClusterHeaderTransforms, APPEND semantics would
+// cause both the old cluster's value AND the new cluster's value to be present on the
+// retry request. The fix pre-removes keys that would be APPENDed or ADD_IF_ABSENTed
+// before applying the new cluster's transforms, so only the new cluster's value appears.
 //
 // Expected behaviour:
-//   1. Initial request  → finalizeRequestHeaders adds x-routed-to:<initial-cluster>
+//   1. Initial request  → finalizeRequestHeaders appends x-routed-to:<initial-cluster>
 //   2. Upstream returns 503 → retry-aware LB switches to the other cluster
-//   3. doRetry calls applyClusterHeaderTransforms for the new cluster → overwrites x-routed-to
-//   4. Retry upstream request must carry x-routed-to:<other-cluster>
+//   3. doRetry calls applyClusterHeaderTransforms: pre-removes x-routed-to, then appends
+//      the new cluster's value → exactly one x-routed-to header with the new cluster's value
+//   4. Retry upstream request must carry exactly x-routed-to:<other-cluster>
 //
 // Both clusters share fake_upstreams_[0] as their physical endpoint; the cluster selected
 // by Envoy is identified through the x-routed-to header written to the upstream request.
@@ -335,7 +340,8 @@ public:
 
           auto* weighted_clusters = route->mutable_route()->mutable_weighted_clusters();
 
-          // cluster_0: stamp the upstream request with x-routed-to: cluster_0 (OVERWRITE).
+          // cluster_0: stamp the upstream request with x-routed-to: cluster_0.
+          // Uses default APPEND_IF_EXISTS_OR_ADD — the common real-world case.
           auto* c0 = weighted_clusters->add_clusters();
           c0->set_name("cluster_0");
           c0->mutable_weight()->set_value(50);
@@ -343,11 +349,11 @@ public:
             auto* hdr = c0->add_request_headers_to_add();
             hdr->mutable_header()->set_key("x-routed-to");
             hdr->mutable_header()->set_value("cluster_0");
-            hdr->set_append_action(
-                envoy::config::core::v3::HeaderValueOption::OVERWRITE_IF_EXISTS_OR_ADD);
+            // append_action intentionally left at default (APPEND_IF_EXISTS_OR_ADD)
           }
 
-          // cluster_1: stamp the upstream request with x-routed-to: cluster_1 (OVERWRITE).
+          // cluster_1: stamp the upstream request with x-routed-to: cluster_1.
+          // Uses default APPEND_IF_EXISTS_OR_ADD — same semantics as cluster_0.
           auto* c1 = weighted_clusters->add_clusters();
           c1->set_name("cluster_1");
           c1->mutable_weight()->set_value(50);
@@ -355,8 +361,7 @@ public:
             auto* hdr = c1->add_request_headers_to_add();
             hdr->mutable_header()->set_key("x-routed-to");
             hdr->mutable_header()->set_value("cluster_1");
-            hdr->set_append_action(
-                envoy::config::core::v3::HeaderValueOption::OVERWRITE_IF_EXISTS_OR_ADD);
+            // append_action intentionally left at default (APPEND_IF_EXISTS_OR_ADD)
           }
         });
 

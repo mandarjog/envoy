@@ -261,11 +261,27 @@ public:
    * configured on the WeightedCluster entry). Parent-route and virtual-host header transforms
    * are intentionally excluded because they were already applied during the initial request.
    * Called by doRetry() when a retry selects a different weighted cluster.
+   *
+   * Because the request already carries the original cluster's per-cluster headers, we must
+   * remove any keys that the new cluster would APPEND or ADD_IF_ABSENT before applying them.
+   * Without this step, APPEND produces two values (old + new) and ADD_IF_ABSENT silently
+   * drops the new cluster's value because the key already exists.
+   * OVERWRITE_IF_EXISTS_OR_ADD headers handle themselves correctly and need no pre-removal.
    */
   void applyClusterHeaderTransforms(Http::RequestHeaderMap& headers,
                                     const Formatter::HttpFormatterContext& context,
                                     const StreamInfo::StreamInfo& stream_info) const override {
-    requestHeaderParser().evaluateHeaders(headers, context, stream_info);
+    const auto& parser = requestHeaderParser();
+    // Pre-remove keys that would otherwise accumulate from the original cluster.
+    // do_formatting=false is sufficient here since we only need the header keys.
+    const auto transforms = parser.getHeaderTransforms(stream_info, /*do_formatting=*/false);
+    for (const auto& [key, _] : transforms.headers_to_append_or_add) {
+      headers.remove(key);
+    }
+    for (const auto& [key, _] : transforms.headers_to_add_if_absent) {
+      headers.remove(key);
+    }
+    parser.evaluateHeaders(headers, context, stream_info);
     if (!config_->host_rewrite_.empty()) {
       headers.setHost(config_->host_rewrite_);
     }
