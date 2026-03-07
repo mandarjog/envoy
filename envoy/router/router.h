@@ -501,6 +501,7 @@ public:
    * return how many times host selection should be reattempted during host selection.
    */
   virtual uint32_t hostSelectionMaxAttempts() const PURE;
+
 };
 
 using RetryStatePtr = std::unique_ptr<RetryState>;
@@ -1170,6 +1171,35 @@ public:
    */
   virtual void refreshRouteCluster(const Http::RequestHeaderMap& headers,
                                    const StreamInfo::StreamInfo& stream_info) const PURE;
+
+  /**
+   * Callback type for refreshing the cluster on retry. Receives the current request headers
+   * and stream info, returns a new route pointing to a different cluster, or nullptr if no
+   * cluster refresh is needed.
+   */
+  using ClusterRefreshFunction = std::function<RouteConstSharedPtr(
+      const Http::RequestHeaderMap& headers, StreamInfo::StreamInfo& stream_info)>;
+
+  /**
+   * Returns a callback function for refreshing the cluster on retry, if applicable.
+   * Weighted cluster routes override this to provide a callback that selects a different
+   * cluster on retry. The router calls this directly in doRetry().
+   * @return a ClusterRefreshFunction, or nullptr if cluster refresh on retry is not supported.
+   */
+  virtual ClusterRefreshFunction clusterRefreshCallback() const { return nullptr; }
+
+  /**
+   * Applies only the cluster-specific request header transforms for this route entry.
+   * Unlike finalizeRequestHeaders(), this does NOT apply parent-route or virtual-host
+   * header transforms (which were already applied during the initial request). This is
+   * called by doRetry() when a weighted-cluster retry lands on a different cluster, so
+   * that the new cluster's per-cluster headers replace those of the failed cluster.
+   *
+   * The default no-op implementation is correct for all non-weighted-cluster routes.
+   */
+  virtual void applyClusterHeaderTransforms(Http::RequestHeaderMap& /*headers*/,
+                                            const Formatter::HttpFormatterContext& /*context*/,
+                                            const StreamInfo::StreamInfo& /*stream_info*/) const {}
 };
 
 /**

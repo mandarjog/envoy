@@ -132,6 +132,10 @@ public:
   const RouteStatsContextOptRef routeStatsContext() const override;
   void refreshRouteCluster(const Http::RequestHeaderMap& headers,
                            const StreamInfo::StreamInfo& stream_info) const override;
+  ClusterRefreshFunction clusterRefreshCallback() const override;
+  void applyClusterHeaderTransforms(Http::RequestHeaderMap& headers,
+                                    const Formatter::HttpFormatterContext& context,
+                                    const StreamInfo::StreamInfo& stream_info) const override;
 
 private:
   const RouteEntry* base_route_entry_{};

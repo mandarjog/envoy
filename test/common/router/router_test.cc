@@ -7617,5 +7617,241 @@ TEST_F(RouterTest, OrcaLoadReportInvalidHeaderValue) {
   response_decoder->decodeHeaders(std::move(response_headers), true);
 }
 
+// =============================================================================
+// Retry-aware weighted cluster tests
+// =============================================================================
+
+// Verify that doRetry() calls route_entry_->clusterRefreshCallback() and, when
+// the callback returns a new route, switches to that route's cluster.
+TEST_F(RouterTest, DoRetryCallsClusterRefreshCallbackAndSwitchesCluster) {
+  // Create a mock route that the callback will return.
+  auto retry_route = std::make_shared<NiceMock<MockRoute>>();
+  retry_route->route_entry_.cluster_name_ = "retry_cluster";
+  cm_.initializeThreadLocalClusters({"retry_cluster"});
+
+  // Mock clusterRefreshCallback() on the route entry to return a callback
+  // that yields the retry route.
+  ON_CALL(callbacks_.route_->route_entry_, clusterRefreshCallback())
+      .WillByDefault(Return(
+          [retry_route](const Http::RequestHeaderMap&,
+                        StreamInfo::StreamInfo&) -> RouteConstSharedPtr { return retry_route; }));
+
+  NiceMock<Http::MockRequestEncoder> encoder1;
+  Http::ResponseDecoder* response_decoder = nullptr;
+  expectNewStreamWithImmediateEncoder(encoder1, &response_decoder, Http::Protocol::Http10);
+  expectResponseTimerCreate();
+
+  Http::TestRequestHeaderMapImpl headers{
+      {"x-envoy-retry-on", "5xx"}, {"x-envoy-internal", "true"}};
+  HttpTestUtility::addDefaultHeaders(headers);
+  router_->decodeHeaders(headers, true);
+  EXPECT_EQ(1U,
+            callbacks_.route_->virtual_host_->virtual_cluster_.stats().upstream_rq_total_.value());
+
+  // Trigger a retry via reset.
+  router_->retry_state_->expectResetRetry();
+  encoder1.stream_.resetStream(Http::StreamResetReason::RemoteReset);
+
+  // Execute the retry — doRetry() should call clusterRefreshCallback() and switch cluster.
+  NiceMock<Http::MockRequestEncoder> encoder2;
+  expectNewStreamWithImmediateEncoder(encoder2, &response_decoder, Http::Protocol::Http10);
+  router_->retry_state_->callback_();
+
+  // Verify that the route was switched to the retry route's cluster.
+  EXPECT_EQ("retry_cluster", router_->route()->routeEntry()->clusterName());
+
+  // Complete the retry with a successful response.
+  Http::ResponseHeaderMapPtr response_headers(
+      new Http::TestResponseHeaderMapImpl({{":status", "200"}}));
+  EXPECT_CALL(callbacks_, encodeHeaders_(_, _));
+  response_decoder->decodeHeaders(std::move(response_headers), true);
+}
+
+// Verify that chained retries correctly call clusterRefreshCallback() on the
+// *current* route entry (not the original). After the first retry switches to
+// retry_route_1, the second retry must call clusterRefreshCallback() on
+// retry_route_1's route entry, which returns retry_route_2.
+TEST_F(RouterTest, DoRetryChainedRetriesSwitchClustersThroughCallbackChain) {
+  // Set up two retry routes: original → retry_route_1 → retry_route_2.
+  auto retry_route_1 = std::make_shared<NiceMock<MockRoute>>();
+  retry_route_1->route_entry_.cluster_name_ = "cluster_b";
+
+  auto retry_route_2 = std::make_shared<NiceMock<MockRoute>>();
+  retry_route_2->route_entry_.cluster_name_ = "cluster_c";
+
+  cm_.initializeThreadLocalClusters({"cluster_b", "cluster_c"});
+
+  // Original route entry → callback returns retry_route_1.
+  ON_CALL(callbacks_.route_->route_entry_, clusterRefreshCallback())
+      .WillByDefault(Return(
+          [retry_route_1](const Http::RequestHeaderMap&,
+                          StreamInfo::StreamInfo&) -> RouteConstSharedPtr {
+            return retry_route_1;
+          }));
+
+  // retry_route_1's route entry → callback returns retry_route_2.
+  ON_CALL(retry_route_1->route_entry_, clusterRefreshCallback())
+      .WillByDefault(Return(
+          [retry_route_2](const Http::RequestHeaderMap&,
+                          StreamInfo::StreamInfo&) -> RouteConstSharedPtr {
+            return retry_route_2;
+          }));
+
+  // retry_route_2's route entry → no more alternatives (returns nullptr).
+  ON_CALL(retry_route_2->route_entry_, clusterRefreshCallback())
+      .WillByDefault(Return(RouteEntry::ClusterRefreshFunction(nullptr)));
+
+  // --- Initial request to original cluster ---
+  NiceMock<Http::MockRequestEncoder> encoder1;
+  Http::ResponseDecoder* response_decoder = nullptr;
+  expectNewStreamWithImmediateEncoder(encoder1, &response_decoder, Http::Protocol::Http10);
+  expectResponseTimerCreate();
+
+  Http::TestRequestHeaderMapImpl headers{
+      {"x-envoy-retry-on", "5xx"}, {"x-envoy-internal", "true"}};
+  HttpTestUtility::addDefaultHeaders(headers);
+  router_->decodeHeaders(headers, true);
+  EXPECT_EQ("fake_cluster", router_->route()->routeEntry()->clusterName());
+
+  // --- Retry 1: original fails → switch to cluster_b ---
+  router_->retry_state_->expectResetRetry();
+  encoder1.stream_.resetStream(Http::StreamResetReason::RemoteReset);
+
+  NiceMock<Http::MockRequestEncoder> encoder2;
+  expectNewStreamWithImmediateEncoder(encoder2, &response_decoder, Http::Protocol::Http10);
+  router_->retry_state_->callback_();
+  EXPECT_EQ("cluster_b", router_->route()->routeEntry()->clusterName());
+
+  // --- Retry 2: cluster_b fails → switch to cluster_c ---
+  // This is the key assertion: doRetry() must call clusterRefreshCallback() on
+  // retry_route_1's route entry (cluster_b), NOT the original mock.
+  router_->retry_state_->expectResetRetry();
+  encoder2.stream_.resetStream(Http::StreamResetReason::RemoteReset);
+
+  NiceMock<Http::MockRequestEncoder> encoder3;
+  expectNewStreamWithImmediateEncoder(encoder3, &response_decoder, Http::Protocol::Http10);
+  router_->retry_state_->callback_();
+  EXPECT_EQ("cluster_c", router_->route()->routeEntry()->clusterName());
+
+  // Complete with success.
+  Http::ResponseHeaderMapPtr response_headers(
+      new Http::TestResponseHeaderMapImpl({{":status", "200"}}));
+  EXPECT_CALL(callbacks_, encodeHeaders_(_, _));
+  response_decoder->decodeHeaders(std::move(response_headers), true);
+}
+
+// Verify that when clusterRefreshCallback() returns nullptr (the default for
+// non-weighted-cluster routes), normal retry proceeds without any disruption.
+TEST_F(RouterTest, DoRetryNormalRetryWhenClusterRefreshCallbackReturnsNull) {
+  // NiceMock default: clusterRefreshCallback() returns nullptr — normal retry behavior.
+
+  NiceMock<Http::MockRequestEncoder> encoder1;
+  Http::ResponseDecoder* response_decoder = nullptr;
+  expectNewStreamWithImmediateEncoder(encoder1, &response_decoder, Http::Protocol::Http10);
+  expectResponseTimerCreate();
+
+  Http::TestRequestHeaderMapImpl headers{
+      {"x-envoy-retry-on", "5xx"}, {"x-envoy-internal", "true"}};
+  HttpTestUtility::addDefaultHeaders(headers);
+  router_->decodeHeaders(headers, true);
+
+  // Trigger retry.
+  router_->retry_state_->expectResetRetry();
+  encoder1.stream_.resetStream(Http::StreamResetReason::RemoteReset);
+
+  NiceMock<Http::MockRequestEncoder> encoder2;
+  expectNewStreamWithImmediateEncoder(encoder2, &response_decoder, Http::Protocol::Http10);
+  router_->retry_state_->callback_();
+
+  // Cluster should remain the same.
+  EXPECT_EQ("fake_cluster", router_->route()->routeEntry()->clusterName());
+
+  // Complete the retry with a successful response.
+  Http::ResponseHeaderMapPtr response_headers(
+      new Http::TestResponseHeaderMapImpl({{":status", "200"}}));
+  EXPECT_CALL(callbacks_, encodeHeaders_(_, _));
+  response_decoder->decodeHeaders(std::move(response_headers), true);
+}
+
+// Verify that doRetry() calls setRoute() and applyClusterHeaderTransforms() on the new
+// route entry when the cluster refresh callback returns a different route.
+TEST_F(RouterTest, DoRetryClusterSwitchCallsSetRouteAndAppliesHeaders) {
+  auto retry_route = std::make_shared<NiceMock<MockRoute>>();
+  retry_route->route_entry_.cluster_name_ = "retry_cluster";
+  cm_.initializeThreadLocalClusters({"retry_cluster"});
+
+  ON_CALL(callbacks_.route_->route_entry_, clusterRefreshCallback())
+      .WillByDefault(Return(
+          [retry_route](const Http::RequestHeaderMap&,
+                        StreamInfo::StreamInfo&) -> RouteConstSharedPtr { return retry_route; }));
+
+  NiceMock<Http::MockRequestEncoder> encoder1;
+  Http::ResponseDecoder* response_decoder = nullptr;
+  expectNewStreamWithImmediateEncoder(encoder1, &response_decoder, Http::Protocol::Http10);
+  expectResponseTimerCreate();
+
+  Http::TestRequestHeaderMapImpl headers{
+      {"x-envoy-retry-on", "5xx"}, {"x-envoy-internal", "true"}};
+  HttpTestUtility::addDefaultHeaders(headers);
+  router_->decodeHeaders(headers, true);
+
+  router_->retry_state_->expectResetRetry();
+  encoder1.stream_.resetStream(Http::StreamResetReason::RemoteReset);
+
+  // Verify that doRetry() calls setRoute() with the new route to keep the CM route cache
+  // in sync, and calls applyClusterHeaderTransforms() on the new route entry.
+  EXPECT_CALL(callbacks_.downstream_callbacks_, setRoute(Eq(retry_route)));
+  EXPECT_CALL(retry_route->route_entry_, applyClusterHeaderTransforms(_, _, _));
+
+  NiceMock<Http::MockRequestEncoder> encoder2;
+  expectNewStreamWithImmediateEncoder(encoder2, &response_decoder, Http::Protocol::Http10);
+  router_->retry_state_->callback_();
+
+  EXPECT_EQ("retry_cluster", router_->route()->routeEntry()->clusterName());
+
+  Http::ResponseHeaderMapPtr response_headers(
+      new Http::TestResponseHeaderMapImpl({{":status", "200"}}));
+  EXPECT_CALL(callbacks_, encodeHeaders_(_, _));
+  response_decoder->decodeHeaders(std::move(response_headers), true);
+}
+
+// Verify that when clusterRefreshCallback() returns nullptr (no cluster switch),
+// doRetry() does NOT call setRoute() or applyClusterHeaderTransforms().
+TEST_F(RouterTest, DoRetryNoClusterSwitchSkipsSetRouteAndHeaderTransforms) {
+  // clusterRefreshCallback() returns nullptr: no cluster switch.
+  ON_CALL(callbacks_.route_->route_entry_, clusterRefreshCallback())
+      .WillByDefault(Return(RouteEntry::ClusterRefreshFunction(nullptr)));
+
+  NiceMock<Http::MockRequestEncoder> encoder1;
+  Http::ResponseDecoder* response_decoder = nullptr;
+  expectNewStreamWithImmediateEncoder(encoder1, &response_decoder, Http::Protocol::Http10);
+  expectResponseTimerCreate();
+
+  Http::TestRequestHeaderMapImpl headers{
+      {"x-envoy-retry-on", "5xx"}, {"x-envoy-internal", "true"}};
+  HttpTestUtility::addDefaultHeaders(headers);
+  router_->decodeHeaders(headers, true);
+
+  router_->retry_state_->expectResetRetry();
+  encoder1.stream_.resetStream(Http::StreamResetReason::RemoteReset);
+
+  // Neither setRoute() nor applyClusterHeaderTransforms() should be called when no
+  // cluster switch occurs.
+  EXPECT_CALL(callbacks_.downstream_callbacks_, setRoute(_)).Times(0);
+  EXPECT_CALL(callbacks_.route_->route_entry_, applyClusterHeaderTransforms(_, _, _)).Times(0);
+
+  NiceMock<Http::MockRequestEncoder> encoder2;
+  expectNewStreamWithImmediateEncoder(encoder2, &response_decoder, Http::Protocol::Http10);
+  router_->retry_state_->callback_();
+
+  // Cluster unchanged.
+  EXPECT_EQ("fake_cluster", router_->route()->routeEntry()->clusterName());
+
+  Http::ResponseHeaderMapPtr response_headers(
+      new Http::TestResponseHeaderMapImpl({{":status", "200"}}));
+  EXPECT_CALL(callbacks_, encodeHeaders_(_, _));
+  response_decoder->decodeHeaders(std::move(response_headers), true);
+}
+
 } // namespace Router
 } // namespace Envoy
