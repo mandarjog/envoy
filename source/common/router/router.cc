@@ -2206,7 +2206,9 @@ void Filter::doRetry(bool can_send_early_data, bool can_use_http3, TimeoutRetry 
         // cluster. Without this, UpstreamRequest constructs stream_info_.route_ from the
         // stale CM cache (the original cluster), breaking autoHostRewrite and upstream
         // filter chains that inspect the route.
-        callbacks_->setRoute(route_);
+        if (callbacks_->downstreamCallbacks()) {
+          callbacks_->downstreamCallbacks()->setRoute(route_);
+        }
         // Apply the new cluster's per-cluster request header transforms. Parent-route and
         // virtual-host transforms were already applied during decodeHeaders and must not be
         // re-applied here (they would duplicate ADD-semantic headers). This fixes the bug

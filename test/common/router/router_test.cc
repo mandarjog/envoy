@@ -7800,7 +7800,7 @@ TEST_F(RouterTest, DoRetryClusterSwitchCallsSetRouteAndAppliesHeaders) {
 
   // Verify that doRetry() calls setRoute() with the new route to keep the CM route cache
   // in sync, and calls applyClusterHeaderTransforms() on the new route entry.
-  EXPECT_CALL(callbacks_, setRoute(Eq(retry_route)));
+  EXPECT_CALL(callbacks_.downstream_callbacks_, setRoute(Eq(retry_route)));
   EXPECT_CALL(retry_route->route_entry_, applyClusterHeaderTransforms(_, _, _));
 
   NiceMock<Http::MockRequestEncoder> encoder2;
@@ -7837,7 +7837,7 @@ TEST_F(RouterTest, DoRetryNoClusterSwitchSkipsSetRouteAndHeaderTransforms) {
 
   // Neither setRoute() nor applyClusterHeaderTransforms() should be called when no
   // cluster switch occurs.
-  EXPECT_CALL(callbacks_, setRoute(_)).Times(0);
+  EXPECT_CALL(callbacks_.downstream_callbacks_, setRoute(_)).Times(0);
   EXPECT_CALL(callbacks_.route_->route_entry_, applyClusterHeaderTransforms(_, _, _)).Times(0);
 
   NiceMock<Http::MockRequestEncoder> encoder2;
