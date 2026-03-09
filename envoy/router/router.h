@@ -1189,6 +1189,20 @@ public:
   virtual ClusterRefreshFunction clusterRefreshCallback() const { return nullptr; }
 
   /**
+   * Removes the header keys that this cluster entry contributed during the initial
+   * finalizeRequestHeaders call. Called by doRetry() on the *old* cluster entry before
+   * switching to the new cluster. Removing by the old cluster's keys (rather than the
+   * new cluster's keys) is correct: it undoes exactly what this cluster contributed,
+   * leaving headers from other levels (virtual host, route) intact. OVERWRITE keys are
+   * also removed so stale values do not linger if the new cluster omits that header.
+   *
+   * The default no-op is correct for all non-weighted-cluster routes.
+   */
+  virtual void removeClusterHeaderTransforms(Http::RequestHeaderMap& /*headers*/,
+                                             const StreamInfo::StreamInfo& /*stream_info*/) const {
+  }
+
+  /**
    * Applies only the cluster-specific request header transforms for this route entry.
    * Unlike finalizeRequestHeaders(), this does NOT apply parent-route or virtual-host
    * header transforms (which were already applied during the initial request). This is

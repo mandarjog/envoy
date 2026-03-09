@@ -7798,8 +7798,9 @@ TEST_F(RouterTest, DoRetryClusterSwitchCallsSetRouteAndAppliesHeaders) {
   router_->retry_state_->expectResetRetry();
   encoder1.stream_.resetStream(Http::StreamResetReason::RemoteReset);
 
-  // Verify that doRetry() calls setRoute() with the new route to keep the CM route cache
-  // in sync, and calls applyClusterHeaderTransforms() on the new route entry.
+  // Verify that doRetry() removes the old cluster's headers, syncs the CM route cache,
+  // and applies the new cluster's headers.
+  EXPECT_CALL(callbacks_.route_->route_entry_, removeClusterHeaderTransforms(_, _));
   EXPECT_CALL(callbacks_.downstream_callbacks_, setRoute(Eq(retry_route)));
   EXPECT_CALL(retry_route->route_entry_, applyClusterHeaderTransforms(_, _, _));
 
@@ -7835,9 +7836,10 @@ TEST_F(RouterTest, DoRetryNoClusterSwitchSkipsSetRouteAndHeaderTransforms) {
   router_->retry_state_->expectResetRetry();
   encoder1.stream_.resetStream(Http::StreamResetReason::RemoteReset);
 
-  // Neither setRoute() nor applyClusterHeaderTransforms() should be called when no
-  // cluster switch occurs.
+  // Neither setRoute(), removeClusterHeaderTransforms(), nor applyClusterHeaderTransforms()
+  // should be called when no cluster switch occurs.
   EXPECT_CALL(callbacks_.downstream_callbacks_, setRoute(_)).Times(0);
+  EXPECT_CALL(callbacks_.route_->route_entry_, removeClusterHeaderTransforms(_, _)).Times(0);
   EXPECT_CALL(callbacks_.route_->route_entry_, applyClusterHeaderTransforms(_, _, _)).Times(0);
 
   NiceMock<Http::MockRequestEncoder> encoder2;

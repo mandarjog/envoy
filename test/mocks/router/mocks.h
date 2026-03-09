@@ -467,6 +467,8 @@ public:
   MOCK_METHOD(void, refreshRouteCluster,
               (const Http::RequestHeaderMap&, const StreamInfo::StreamInfo&), (const));
   MOCK_METHOD(ClusterRefreshFunction, clusterRefreshCallback, (), (const));
+  MOCK_METHOD(void, removeClusterHeaderTransforms,
+              (Http::RequestHeaderMap&, const StreamInfo::StreamInfo&), (const));
   MOCK_METHOD(void, applyClusterHeaderTransforms,
               (Http::RequestHeaderMap&, const Formatter::HttpFormatterContext&,
                const StreamInfo::StreamInfo&),
@@ -595,6 +597,8 @@ public:
   MOCK_METHOD(void, refreshRouteCluster,
               (const Http::RequestHeaderMap&, const StreamInfo::StreamInfo&), (const));
   MOCK_METHOD(ClusterRefreshFunction, clusterRefreshCallback, (), (const));
+  MOCK_METHOD(void, removeClusterHeaderTransforms,
+              (Http::RequestHeaderMap&, const StreamInfo::StreamInfo&), (const));
   MOCK_METHOD(void, applyClusterHeaderTransforms,
               (Http::RequestHeaderMap&, const Formatter::HttpFormatterContext&,
                const StreamInfo::StreamInfo&),

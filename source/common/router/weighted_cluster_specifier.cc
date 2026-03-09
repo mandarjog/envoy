@@ -257,31 +257,39 @@ public:
   }
 
   /**
-   * Applies only the cluster-specific request header transforms (request_headers_to_add/remove
-   * configured on the WeightedCluster entry). Parent-route and virtual-host header transforms
-   * are intentionally excluded because they were already applied during the initial request.
-   * Called by doRetry() when a retry selects a different weighted cluster.
-   *
-   * Because the request already carries the original cluster's per-cluster headers, we must
-   * remove any keys that the new cluster would APPEND or ADD_IF_ABSENT before applying them.
-   * Without this step, APPEND produces two values (old + new) and ADD_IF_ABSENT silently
-   * drops the new cluster's value because the key already exists.
-   * OVERWRITE_IF_EXISTS_OR_ADD headers handle themselves correctly and need no pre-removal.
+   * Removes the header keys that this cluster entry contributed during the initial
+   * finalizeRequestHeaders call. Called by doRetry() on the *old* cluster before switching
+   * to the new one. Removes APPEND, ADD_IF_ABSENT, and OVERWRITE keys so that stale
+   * cluster-specific values don't persist or accumulate when the new cluster applies its
+   * own transforms. Only the cluster-level parser's keys are removed; route-level and
+   * virtual-host-level headers (applied at a different parser level) are left intact.
    */
-  void applyClusterHeaderTransforms(Http::RequestHeaderMap& headers,
-                                    const Formatter::HttpFormatterContext& context,
-                                    const StreamInfo::StreamInfo& stream_info) const override {
-    const auto& parser = requestHeaderParser();
-    // Pre-remove keys that would otherwise accumulate from the original cluster.
-    // do_formatting=false is sufficient here since we only need the header keys.
-    const auto transforms = parser.getHeaderTransforms(stream_info, /*do_formatting=*/false);
+  void removeClusterHeaderTransforms(Http::RequestHeaderMap& headers,
+                                     const StreamInfo::StreamInfo& stream_info) const override {
+    const auto transforms =
+        requestHeaderParser().getHeaderTransforms(stream_info, /*do_formatting=*/false);
     for (const auto& [key, _] : transforms.headers_to_append_or_add) {
       headers.remove(key);
     }
     for (const auto& [key, _] : transforms.headers_to_add_if_absent) {
       headers.remove(key);
     }
-    parser.evaluateHeaders(headers, context, stream_info);
+    for (const auto& [key, _] : transforms.headers_to_overwrite_or_add) {
+      headers.remove(key);
+    }
+  }
+
+  /**
+   * Applies only the cluster-specific request header transforms (request_headers_to_add/remove
+   * configured on the WeightedCluster entry). Called by doRetry() on the *new* cluster after
+   * removeClusterHeaderTransforms has already cleared the old cluster's contributions.
+   * Parent-route and virtual-host transforms are intentionally excluded (already applied
+   * during the initial request and must not be re-applied).
+   */
+  void applyClusterHeaderTransforms(Http::RequestHeaderMap& headers,
+                                    const Formatter::HttpFormatterContext& context,
+                                    const StreamInfo::StreamInfo& stream_info) const override {
+    requestHeaderParser().evaluateHeaders(headers, context, stream_info);
     if (!config_->host_rewrite_.empty()) {
       headers.setHost(config_->host_rewrite_);
     }

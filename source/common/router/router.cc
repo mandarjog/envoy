@@ -2199,6 +2199,12 @@ void Filter::doRetry(bool can_send_early_data, bool can_use_http3, TimeoutRetry 
     if (cluster_refresh_cb != nullptr) {
       auto retry_route = cluster_refresh_cb(*downstream_headers_, callbacks_->streamInfo());
       if (retry_route != nullptr) {
+        // Undo the old cluster's per-cluster header contributions before switching.
+        // Removing by the *old* cluster's keys (APPEND, ADD_IF_ABSENT, OVERWRITE) ensures
+        // only this cluster's transforms are undone; route-level and virtual-host-level
+        // headers applied during decodeHeaders are left intact.
+        route_entry_->removeClusterHeaderTransforms(*downstream_headers_,
+                                                    callbacks_->streamInfo());
         route_ = std::move(retry_route);
         route_entry_ = route_->routeEntry();
         // Sync the connection-manager route cache so that callbacks_->route() and
@@ -2209,11 +2215,7 @@ void Filter::doRetry(bool can_send_early_data, bool can_use_http3, TimeoutRetry 
         if (callbacks_->downstreamCallbacks()) {
           callbacks_->downstreamCallbacks()->setRoute(route_);
         }
-        // Apply the new cluster's per-cluster request header transforms. Parent-route and
-        // virtual-host transforms were already applied during decodeHeaders and must not be
-        // re-applied here (they would duplicate ADD-semantic headers). This fixes the bug
-        // where a retry to a different cluster would still carry the original cluster's
-        // cluster-specific headers.
+        // Apply the new cluster's per-cluster request header transforms.
         const Formatter::HttpFormatterContext formatter_context(
             downstream_headers_, {}, {}, {}, {}, &callbacks_->activeSpan());
         route_entry_->applyClusterHeaderTransforms(*downstream_headers_, formatter_context,
