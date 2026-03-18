@@ -509,7 +509,12 @@ RetryStateImpl::wouldRetryFromReset(const Http::StreamResetReason reset_reason,
   if (retry_on_ & (RetryPolicy::RETRY_ON_5XX | RetryPolicy::RETRY_ON_GATEWAY_ERROR)) {
     // Currently we count an upstream reset as a "5xx" (since it will result in
     // one). With RETRY_ON_RESET we may eventually remove these policies.
-    return RetryDecision::RetryWithBackoff;
+    // However, if the upstream already received data from us (request started), retrying
+    // is unsafe: the upstream may have partially or fully processed the request, and a
+    // retry could cause duplicate processing. Only retry if no bytes have been sent yet.
+    if (!upstream_request_started) {
+      return RetryDecision::RetryWithBackoff;
+    }
   }
 
   if ((retry_on_ & RetryPolicy::RETRY_ON_REFUSED_STREAM) &&
