@@ -90,17 +90,32 @@ struct NullPathMatchCriterion : public Router::PathMatchCriterion {
   const std::string& matcher() const override { return EMPTY_STRING; }
 };
 
+// A HashPolicy implementation that always returns a fixed, pre-computed value.
+// Used by shadow streams so that consistent-hash load balancers select the same
+// upstream host as the primary request regardless of any header mutations that
+// are applied to the shadow copy.
+struct FixedHashPolicy : public HashPolicy {
+  explicit FixedHashPolicy(uint64_t hash) : hash_(hash) {}
+  absl::optional<uint64_t> generateHash(OptRef<const RequestHeaderMap>,
+                                         OptRef<const StreamInfo::StreamInfo>,
+                                         AddCookieCallback) const override {
+    return hash_;
+  }
+  const uint64_t hash_;
+};
+
 struct RouteEntryImpl : public Router::RouteEntry {
   static absl::StatusOr<std::unique_ptr<RouteEntryImpl>>
   create(const std::string& cluster_name, const absl::optional<std::chrono::milliseconds>& timeout,
          const Protobuf::RepeatedPtrField<envoy::config::route::v3::RouteAction::HashPolicy>&
              hash_policy,
          Router::RetryPolicyConstSharedPtr retry_policy, Regex::Engine& regex_engine,
-         const Router::MetadataMatchCriteria* metadata_match) {
+         const Router::MetadataMatchCriteria* metadata_match,
+         absl::optional<uint64_t> precomputed_hash_key = absl::nullopt) {
     absl::Status creation_status = absl::OkStatus();
     auto ret = std::unique_ptr<RouteEntryImpl>(
         new RouteEntryImpl(cluster_name, timeout, hash_policy, std::move(retry_policy),
-                           regex_engine, creation_status, metadata_match));
+                           regex_engine, creation_status, metadata_match, precomputed_hash_key));
     RETURN_IF_NOT_OK(creation_status);
     return ret;
   }
@@ -111,10 +126,13 @@ protected:
       const Protobuf::RepeatedPtrField<envoy::config::route::v3::RouteAction::HashPolicy>&
           hash_policy,
       Router::RetryPolicyConstSharedPtr retry_policy, Regex::Engine& regex_engine,
-      absl::Status& creation_status, const Router::MetadataMatchCriteria* metadata_match)
+      absl::Status& creation_status, const Router::MetadataMatchCriteria* metadata_match,
+      absl::optional<uint64_t> precomputed_hash_key = absl::nullopt)
       : metadata_match_(metadata_match), retry_policy_(std::move(retry_policy)),
         cluster_name_(cluster_name), timeout_(timeout) {
-    if (!hash_policy.empty()) {
+    if (precomputed_hash_key.has_value()) {
+      hash_policy_ = std::make_unique<FixedHashPolicy>(*precomputed_hash_key);
+    } else if (!hash_policy.empty()) {
       auto policy_or_error = HashPolicyImpl::create(hash_policy, regex_engine);
       SET_AND_RETURN_IF_NOT_OK(policy_or_error.status(), creation_status);
       hash_policy_ = std::move(*policy_or_error);
@@ -213,7 +231,7 @@ protected:
                            const StreamInfo::StreamInfo&) const override {}
 
   const Router::MetadataMatchCriteria* metadata_match_;
-  std::unique_ptr<const HashPolicyImpl> hash_policy_;
+  std::unique_ptr<const HashPolicy> hash_policy_;
   const Router::RetryPolicyConstSharedPtr retry_policy_;
 
   static const NullHedgePolicy hedge_policy_;
@@ -240,11 +258,12 @@ struct NullRouteImpl : public Router::Route {
          Regex::Engine& regex_engine, const absl::optional<std::chrono::milliseconds>& timeout = {},
          const Protobuf::RepeatedPtrField<envoy::config::route::v3::RouteAction::HashPolicy>&
              hash_policy = {},
-         const Router::MetadataMatchCriteria* metadata_match = nullptr) {
+         const Router::MetadataMatchCriteria* metadata_match = nullptr,
+         absl::optional<uint64_t> precomputed_hash_key = absl::nullopt) {
     absl::Status creation_status;
     auto ret = std::unique_ptr<NullRouteImpl>(
         new NullRouteImpl(cluster_name, std::move(retry_policy), regex_engine, timeout, hash_policy,
-                          creation_status, metadata_match));
+                          creation_status, metadata_match, precomputed_hash_key));
     RETURN_IF_NOT_OK(creation_status);
     return ret;
   }
@@ -281,9 +300,11 @@ protected:
                 const Protobuf::RepeatedPtrField<envoy::config::route::v3::RouteAction::HashPolicy>&
                     hash_policy,
                 absl::Status& creation_status,
-                const Router::MetadataMatchCriteria* metadata_match) {
-    auto entry_or_error = RouteEntryImpl::create(
-        cluster_name, timeout, hash_policy, std::move(retry_policy), regex_engine, metadata_match);
+                const Router::MetadataMatchCriteria* metadata_match,
+                absl::optional<uint64_t> precomputed_hash_key = absl::nullopt) {
+    auto entry_or_error = RouteEntryImpl::create(cluster_name, timeout, hash_policy,
+                                                  std::move(retry_policy), regex_engine,
+                                                  metadata_match, precomputed_hash_key);
     SET_AND_RETURN_IF_NOT_OK(entry_or_error.status(), creation_status);
     route_entry_ = std::move(*entry_or_error);
   }

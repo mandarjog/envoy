@@ -1,6 +1,8 @@
 #include <chrono>
 #include <string>
 
+#include "envoy/config/cluster/v3/cluster.pb.h"
+#include "envoy/config/route/v3/route_components.pb.h"
 #include "envoy/extensions/access_loggers/file/v3/file.pb.h"
 #include "envoy/extensions/filters/http/router/v3/router.pb.h"
 #include "envoy/extensions/filters/http/upstream_codec/v3/upstream_codec.pb.h"
@@ -1118,6 +1120,147 @@ TEST_P(ShadowPolicyIntegrationTest, ShadowWithHeaderManipulation) {
   EXPECT_EQ(upstream_headers_->getHostValue(), "sni.lyft.com");
 
   cleanupUpstreamAndDownstream();
+}
+
+// ---------------------------------------------------------------------------
+// Consistent-hash mirror tests
+// ---------------------------------------------------------------------------
+
+// Fixture that configures:
+//   cluster_0  – 1 endpoint (round-robin)  → fake_upstreams_[0]
+//   cluster_1  – 2 endpoints (RING_HASH)   → fake_upstreams_[1], fake_upstreams_[2]
+//
+// The downstream route hashes on an "x-hash-key" request header and mirrors
+// all traffic to cluster_1.  Sending multiple requests that carry the same
+// header value must always land on the SAME shadow endpoint.
+class ShadowPolicyConsistentHashIntegrationTest
+    : public testing::TestWithParam<Network::Address::IpVersion>,
+      public HttpIntegrationTest {
+public:
+  ShadowPolicyConsistentHashIntegrationTest()
+      : HttpIntegrationTest(Http::CodecType::HTTP2, GetParam()) {
+    setUpstreamProtocol(Http::CodecType::HTTP2);
+    autonomous_upstream_ = true;
+    // 3 upstreams: [0] for cluster_0, [1] and [2] for cluster_1 (shadow).
+    setUpstreamCount(3);
+  }
+
+  void initialize() override {
+    // Add cluster_1 with RING_HASH and two endpoints.
+    config_helper_.addConfigModifier(
+        [this](envoy::config::bootstrap::v3::Bootstrap& bootstrap) {
+          auto* cluster = bootstrap.mutable_static_resources()->add_clusters();
+          cluster->set_name("cluster_1");
+          ConfigHelper::setHttp2(*cluster);
+          cluster->set_lb_policy(envoy::config::cluster::v3::Cluster::RING_HASH);
+
+          auto* load_assignment = cluster->mutable_load_assignment();
+          load_assignment->set_cluster_name("cluster_1");
+          auto* locality = load_assignment->add_endpoints();
+
+          // Two endpoints – ports filled in by ConfigHelper::finalize in
+          // ascending order over fake_upstreams_ (indices 1 and 2).
+          for (int i = 0; i < 2; ++i) {
+            auto* lb_ep = locality->add_lb_endpoints();
+            auto* sock = lb_ep->mutable_endpoint()
+                             ->mutable_address()
+                             ->mutable_socket_address();
+            sock->set_address(Network::Test::getLoopbackAddressString(version_));
+            sock->set_port_value(0);
+          }
+        });
+
+    // Mirror every request to cluster_1 and hash on "x-hash-key".
+    config_helper_.addConfigModifier(
+        [](envoy::extensions::filters::network::http_connection_manager::v3::
+               HttpConnectionManager& hcm) {
+          auto* route = hcm.mutable_route_config()
+                            ->mutable_virtual_hosts(0)
+                            ->mutable_routes(0)
+                            ->mutable_route();
+
+          auto* mirror = route->add_request_mirror_policies();
+          mirror->set_cluster("cluster_1");
+
+          auto* hash_policy = route->add_hash_policy();
+          hash_policy->mutable_header()->set_header_name("x-hash-key");
+        });
+
+    HttpIntegrationTest::initialize();
+  }
+
+  // Sends a header-only request with the given hash-key header value and waits
+  // for both the primary response and the shadow request to complete.
+  void sendRequestWithHashKey(const std::string& hash_value, int expected_shadow_completions) {
+    codec_client_ = makeHttpConnection(lookupPort("http"));
+
+    Http::TestRequestHeaderMapImpl request_headers = default_request_headers_;
+    request_headers.addCopy("x-hash-key", hash_value);
+
+    IntegrationStreamDecoderPtr response =
+        codec_client_->makeHeaderOnlyRequest(request_headers);
+    ASSERT_TRUE(response->waitForEndStream());
+    EXPECT_TRUE(response->complete());
+    EXPECT_EQ("200", response->headers().getStatusValue());
+
+    test_server_->waitForCounterGe("cluster.cluster_1.internal.upstream_rq_completed",
+                                   expected_shadow_completions);
+
+    cleanupUpstreamAndDownstream();
+  }
+};
+
+INSTANTIATE_TEST_SUITE_P(IpVersions, ShadowPolicyConsistentHashIntegrationTest,
+                         testing::ValuesIn(TestEnvironment::getIpVersionsForTest()));
+
+// Send N requests with the identical hash-key header value and assert that all
+// shadow copies land on the same upstream endpoint.  With ring-hash LB and the
+// pre-computed hash key propagated through the shadow options, every request
+// hashes to the same ring slot → same endpoint.  Without the fix, shadow
+// requests carry no hash key and the ring-hash falls back to random selection,
+// which would almost certainly spread requests across both endpoints.
+TEST_P(ShadowPolicyConsistentHashIntegrationTest, SameShadowEndpointForSameHashKey) {
+  initialize();
+
+  const int kNumRequests = 10;
+  for (int i = 1; i <= kNumRequests; ++i) {
+    sendRequestWithHashKey("stable-hash-value", i);
+  }
+
+  // Read last-request headers from both shadow endpoints.  lastRequestHeaders()
+  // moves the internal unique_ptr, so it returns null if the upstream received
+  // no requests at all.
+  auto shadow_a =
+      reinterpret_cast<AutonomousUpstream*>(fake_upstreams_[1].get())->lastRequestHeaders();
+  auto shadow_b =
+      reinterpret_cast<AutonomousUpstream*>(fake_upstreams_[2].get())->lastRequestHeaders();
+
+  // Exactly one shadow upstream should have received requests; the other must
+  // have received none (null lastRequestHeaders).
+  EXPECT_NE(shadow_a == nullptr, shadow_b == nullptr)
+      << "Expected all shadow requests to land on the same upstream endpoint "
+         "(consistent-hash), but both shadow endpoints received traffic.";
+}
+
+// Sanity-check: requests with different hash-key values may (and typically do)
+// land on different shadow endpoints, proving the hash policy is active.
+TEST_P(ShadowPolicyConsistentHashIntegrationTest, DifferentHashKeysMayHitDifferentEndpoints) {
+  initialize();
+
+  // Drive enough distinct key values to almost certainly populate both ring
+  // slots.  We only assert that the cluster received all expected shadow hits;
+  // endpoint spread is probabilistic and not verified here.
+  const std::vector<std::string> keys = {"key-alpha", "key-beta",  "key-gamma",
+                                         "key-delta", "key-epsilon"};
+  for (size_t i = 0; i < keys.size(); ++i) {
+    sendRequestWithHashKey(keys[i], static_cast<int>(i + 1));
+  }
+
+  // Both shadow upstreams may or may not have received traffic – we just
+  // verify the cluster counter shows all shadow requests arrived.
+  EXPECT_GE(
+      test_server_->counter("cluster.cluster_1.internal.upstream_rq_completed")->value(),
+      static_cast<uint64_t>(keys.size()));
 }
 
 } // namespace

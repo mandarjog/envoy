@@ -399,6 +399,13 @@ public:
       return *this;
     }
 
+    // Pass a hash key already computed from the original request so that shadow
+    // clusters using consistent-hash LB select the same host as the primary.
+    StreamOptions& setPrecomputedHashKey(absl::optional<uint64_t> key) {
+      precomputed_hash_key = key;
+      return *this;
+    }
+
     // For gmock test
     bool operator==(const StreamOptions& src) const {
       return timeout == src.timeout && buffer_body_for_retry == src.buffer_body_for_retry &&
@@ -470,6 +477,11 @@ public:
 
     // Optional upstream override host for bypassing load balancer selection
     absl::optional<Upstream::LoadBalancerContext::OverrideHost> upstream_override_host_;
+
+    // When set, shadow streams use this pre-computed hash instead of re-deriving
+    // it from (possibly mutated) shadow headers, so consistent-hash LB picks the
+    // same upstream endpoint as the primary request.
+    absl::optional<uint64_t> precomputed_hash_key;
   };
 
   /**

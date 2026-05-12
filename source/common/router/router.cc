@@ -832,6 +832,12 @@ bool Filter::continueDecodeHeaders(Upstream::ThreadLocalCluster* cluster,
     }
     auto shadow_headers = Http::createHeaderMap<Http::RequestHeaderMapImpl>(*shadow_headers_);
     applyShadowPolicyHeaders(shadow_policy, *shadow_headers);
+    // Compute the hash key from the original (unmodified) request context so
+    // that consistent-hash LB on the shadow cluster selects the same upstream
+    // host as the primary.  Shadow headers may differ (e.g. host suffix, header
+    // mutations), so re-deriving the hash from them would produce a different
+    // host selection.
+    const absl::optional<uint64_t> shadow_hash = computeHashKey();
     const auto options =
         Http::AsyncClient::RequestOptions()
             .setTimeout(timeout_.global_timeout_)
@@ -853,7 +859,8 @@ bool Filter::continueDecodeHeaders(Upstream::ThreadLocalCluster* cluster,
             }())
             .setDiscardResponseBody(true)
             .setFilterConfig(config_)
-            .setParentContext(Http::AsyncClient::ParentContext{&callbacks_->streamInfo()});
+            .setParentContext(Http::AsyncClient::ParentContext{&callbacks_->streamInfo()})
+            .setPrecomputedHashKey(shadow_hash);
     if (end_stream) {
       // This is a header-only request, and can be dispatched immediately to the shadow
       // without waiting.
